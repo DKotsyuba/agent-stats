@@ -1,0 +1,17 @@
+listen = "127.0.0.1:4318"
+state_dir = "/var/lib/agent-stats"
+socket = "/run/agent-stats/read.sock"
+token_file = "/etc/agent-stats/ingest.token"
+digest_key_file = "/etc/agent-stats/digest.key"
+
+# The service UID is implicit. Add the Hub's numeric UID here and grant it socket group access.
+allowed_uids = []
+
+max_body_bytes = 524288
+max_records = 512
+max_requests = 8
+write_backlog = 8
+
+[provider_labels]
+# Applied only if an api_request supplies anthropic.base_url and custom_base_url=true.
+# "https://example.invalid/anthropic" = "example"
