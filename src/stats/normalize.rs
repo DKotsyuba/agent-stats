@@ -119,6 +119,7 @@ fn sample(record: Record<'_>, config: &Config, key: &hmac::Key) -> Option<Sample
                 "model"
                     | "effort"
                     | "request_id"
+                    | "client_request_id"
                     | "anthropic.custom_base_url"
                     | "anthropic.base_url"
                     | "duration_ms"
@@ -140,7 +141,12 @@ fn sample(record: Record<'_>, config: &Config, key: &hmac::Key) -> Option<Sample
         .collect();
     let string = |name: &str| attributes.get(name)?.get("stringValue")?.as_str();
     let model = string("model").filter(|value| label(value))?;
-    let id = string("request_id").filter(|value| !value.is_empty() && value.len() <= 512)?;
+    // Custom gateways (OpenCode Go, Z.ai) may omit the provider request id; Claude Code always sets its own
+    // client request id, which still identifies one API call for deduplication.
+    let usable = |value: &&str| !value.is_empty() && value.len() <= 512;
+    let id = string("request_id")
+        .filter(usable)
+        .or_else(|| string("client_request_id").filter(usable))?;
     let provider = match attributes
         .get("anthropic.custom_base_url")
         .and_then(|value| value["boolValue"].as_bool())
@@ -189,9 +195,10 @@ fn integer(value: &Value) -> Option<i64> {
 pub(super) fn label(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(byte, b'-' | b'_' | b'.' | b':' | b'[' | b']' | b'/')
+        })
 }
 
 #[cfg(test)]
@@ -234,5 +241,44 @@ mod tests {
             .insert("https://example.invalid".into(), "example".into());
         let batch = normalize(body.as_bytes(), &config, &key, time).expect("normalize");
         assert_eq!(batch.samples[0].provider, "example");
+    }
+
+    /// Custom gateways may omit request_id; the client request id still identifies the call, and
+    /// bracketed model names such as `glm-5.4[1m]` are kept.
+    #[test]
+    fn gateway_without_request_id_uses_client_request_id() {
+        let mut event: Value =
+            serde_json::from_str(include_str!("../../tests/claude_api_request.json"))
+                .expect("Claude Code fixture");
+        let sample = &mut event["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0];
+        let time: i64 = sample["timeUnixNano"]
+            .as_str()
+            .expect("timestamp")
+            .parse()
+            .expect("nanos");
+        let attributes = sample["attributes"].as_array_mut().expect("attributes");
+        attributes.retain(|attr| attr["key"] != "request_id" && attr["key"] != "client_request_id");
+        for attr in attributes.iter_mut() {
+            if attr["key"] == "model" {
+                attr["value"] = json!({"stringValue":"glm-5.4[1m]"});
+            }
+        }
+        let config = Config::default();
+        let key = hmac::Key::new(hmac::HMAC_SHA256, b"fixture digest key");
+        let without = event.to_string();
+        assert_eq!(
+            normalize(without.as_bytes(), &config, &key, time)
+                .expect("normalize")
+                .invalid,
+            1
+        );
+        event["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]["attributes"]
+            .as_array_mut()
+            .expect("attributes")
+            .push(json!({"key":"client_request_id","value":{"stringValue":"client-1"}}));
+        let batch =
+            normalize(event.to_string().as_bytes(), &config, &key, time).expect("normalize");
+        assert_eq!(batch.samples.len(), 1);
+        assert_eq!(batch.samples[0].model, "glm-5.4[1m]");
     }
 }
