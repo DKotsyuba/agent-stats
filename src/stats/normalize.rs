@@ -120,6 +120,8 @@ fn sample(record: Record<'_>, config: &Config, key: &hmac::Key) -> Option<Sample
                     | "effort"
                     | "request_id"
                     | "client_request_id"
+                    | "session.id"
+                    | "event.sequence"
                     | "anthropic.custom_base_url"
                     | "anthropic.base_url"
                     | "duration_ms"
@@ -144,9 +146,18 @@ fn sample(record: Record<'_>, config: &Config, key: &hmac::Key) -> Option<Sample
     // Custom gateways (OpenCode Go, Z.ai) may omit the provider request id; Claude Code always sets its own
     // client request id, which still identifies one API call for deduplication.
     let usable = |value: &&str| !value.is_empty() && value.len() <= 512;
+    // Older Claude Code builds behind gateways send neither id; the per-session event sequence is unique
+    // within one session. The session id only enters the HMAC digest and is never stored.
+    let sequence = attributes
+        .get("event.sequence")
+        .and_then(|value| integer(&value["intValue"]))
+        .zip(string("session.id").filter(usable))
+        .map(|(sequence, session)| format!("seq:{session}/{sequence}"));
     let id = string("request_id")
         .filter(usable)
-        .or_else(|| string("client_request_id").filter(usable))?;
+        .or_else(|| string("client_request_id").filter(usable))
+        .map(str::to_owned)
+        .or(sequence)?;
     let provider = match attributes
         .get("anthropic.custom_base_url")
         .and_then(|value| value["boolValue"].as_bool())
@@ -257,7 +268,15 @@ mod tests {
             .parse()
             .expect("nanos");
         let attributes = sample["attributes"].as_array_mut().expect("attributes");
-        attributes.retain(|attr| attr["key"] != "request_id" && attr["key"] != "client_request_id");
+        attributes.retain(|attr| {
+            ![
+                "request_id",
+                "client_request_id",
+                "session.id",
+                "event.sequence",
+            ]
+            .contains(&attr["key"].as_str().unwrap_or(""))
+        });
         for attr in attributes.iter_mut() {
             if attr["key"] == "model" {
                 attr["value"] = json!({"stringValue":"glm-5.4[1m]"});
@@ -280,5 +299,15 @@ mod tests {
             normalize(event.to_string().as_bytes(), &config, &key, time).expect("normalize");
         assert_eq!(batch.samples.len(), 1);
         assert_eq!(batch.samples[0].model, "glm-5.4[1m]");
+        let mut by_sequence = event.clone();
+        let attrs = by_sequence["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]["attributes"]
+            .as_array_mut()
+            .expect("attributes");
+        attrs.retain(|attr| attr["key"] != "client_request_id");
+        attrs.push(json!({"key":"session.id","value":{"stringValue":"session-1"}}));
+        attrs.push(json!({"key":"event.sequence","value":{"intValue":"7"}}));
+        let batch =
+            normalize(by_sequence.to_string().as_bytes(), &config, &key, time).expect("normalize");
+        assert_eq!(batch.samples.len(), 1);
     }
 }
