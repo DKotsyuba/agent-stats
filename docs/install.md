@@ -60,3 +60,21 @@ Canary one Run worker and one owner session before wider rollout. Verify
 `agent-stats status` and `agent-stats stats --window 24h`. Remove these
 environment entries from their respective launchers to roll back telemetry.
 Existing samples expire on the normal retention schedule.
+
+## Enable Codex
+
+Add this to the Codex configuration used by the session or worker. Use the
+actual loopback port and ingest token, keep the configuration private, and
+leave user prompt logging disabled.
+
+```toml
+[otel]
+exporter = { otlp-http = { endpoint = "http://127.0.0.1:4318/v1/logs", protocol = "json", headers = { "x-stats-token" = "<token>" } } }
+log_user_prompt = false
+```
+
+After a Codex response, verify ingestion with
+`agent-stats stats --window 24h --group-by harness+model`. Agent Stats records
+reported token counts and time to first token. It estimates duration only
+when one observed WebSocket request matches the completion. A group or series
+bucket with qualifying speed samples from those pairs has `speed_estimated: true`.

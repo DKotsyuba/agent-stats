@@ -1,5 +1,10 @@
 //! A single writer owns the database. Readers use bounded, independent snapshots.
-use super::{Error, RETENTION_NS, config, normalize::Batch};
+use super::{
+    Error, RETENTION_NS,
+    codex::{Kind, Pairing},
+    config,
+    normalize::{Batch, Sample},
+};
 use rusqlite::{Connection, OpenFlags, params};
 use std::{
     path::Path,
@@ -8,7 +13,7 @@ use std::{
 
 /// Verify the data directory and initialize the raw sample schema.
 pub(super) fn open(path: &Path) -> Result<Connection, Error> {
-    let conn = Connection::open_with_flags(
+    let mut conn = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_WRITE
             | OpenFlags::SQLITE_OPEN_CREATE
@@ -38,10 +43,30 @@ pub(super) fn open(path: &Path) -> Result<Connection, Error> {
          ) STRICT;
          CREATE INDEX IF NOT EXISTS samples_time ON samples(time_ns);",
     )?;
+    migrate(&mut conn)?;
     // Bound retained data volume even when all samples are inside the retention window.
     let page_size: u32 = conn.pragma_query_value(None, "page_size", |row| row.get(0))?;
     conn.pragma_update(None, "max_page_count", (256 * 1024 * 1024) / page_size)?;
     Ok(conn)
+}
+
+/// Upgrade the original schema atomically; legacy rows keep exact duration provenance.
+fn migrate(conn: &mut Connection) -> Result<(), Error> {
+    let tx = conn.transaction()?;
+    let has_provenance: bool = tx.query_row(
+        "SELECT EXISTS (SELECT 1 FROM pragma_table_info('samples') WHERE name = 'duration_source')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_provenance {
+        tx.execute_batch(
+            "ALTER TABLE samples ADD COLUMN duration_source TEXT DEFAULT 'exact'
+                CHECK (duration_source IN ('exact', 'estimated'));
+             ALTER TABLE samples ADD COLUMN reasoning_tokens INTEGER;",
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
 }
 
 /// Hold the service lock before opening its private database.
@@ -52,17 +77,28 @@ pub(super) fn prepare(directory: &Path) -> Result<(std::fs::File, Connection), E
     Ok((lock, conn))
 }
 
-/// Commit the whole batch or roll it back. Return counts only after durable commit.
-pub(super) fn insert(conn: &mut Connection, batch: &Batch) -> Result<(usize, usize), Error> {
+/// Commit the whole batch before publishing pairing state or returning row counts.
+pub(super) fn insert(
+    conn: &mut Connection,
+    pairing: &mut Pairing,
+    batch: &mut Batch,
+) -> Result<(usize, usize), Error> {
+    let mut staged = (!batch.codex.is_empty()).then(|| pairing.clone());
     let tx = conn.transaction()?;
     let mut inserted = 0;
+    let total = batch.sample_count();
     {
         let mut statement = tx.prepare_cached(
-            "INSERT INTO samples VALUES ('claude-code', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "INSERT INTO samples (
+                harness, request_digest, time_ns, provider, model, effort, input_tokens,
+                output_tokens, cache_read_tokens, cache_creation_tokens, cache_creation_5m_tokens,
+                cache_creation_1h_tokens, duration_ms, ttft_ms, duration_source, reasoning_tokens
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(harness, request_digest) DO NOTHING",
         )?;
-        for sample in &batch.samples {
-            inserted += statement.execute(params![
+        let mut insert_sample = |sample: &Sample, duration_ms, source| {
+            statement.execute(params![
+                sample.harness,
                 sample.digest.as_slice(),
                 sample.time_ns,
                 sample.provider,
@@ -74,13 +110,37 @@ pub(super) fn insert(conn: &mut Connection, batch: &Batch) -> Result<(usize, usi
                 sample.tokens[3],
                 sample.tokens[4],
                 sample.tokens[5],
-                sample.duration_ms,
+                duration_ms,
                 sample.ttft_ms,
-            ])?;
+                source,
+                sample.reasoning_tokens,
+            ])
+        };
+        for sample in &batch.samples {
+            inserted += insert_sample(sample, sample.duration_ms, Some("exact"))?;
+        }
+        if let Some(state) = &mut staged {
+            let now = Instant::now();
+            state.expire(now);
+            batch.codex.sort_by_key(|event| event.time_ns);
+            for event in &batch.codex {
+                match &event.kind {
+                    Kind::Request(model) => state.request(event, model, now),
+                    Kind::Completed(sample) => {
+                        let duration = state.duration(event, &sample.model, now);
+                        let added = insert_sample(sample, duration, duration.map(|_| "estimated"))?;
+                        state.complete(event, now);
+                        inserted += added;
+                    }
+                }
+            }
         }
     }
     tx.commit()?;
-    Ok((inserted, batch.samples.len() - inserted))
+    if let Some(staged) = staged {
+        *pairing = staged;
+    }
+    Ok((inserted, total - inserted))
 }
 
 /// Expire at most 512 rows, preserving the exact inclusive retention boundary.
@@ -125,17 +185,57 @@ impl From<rusqlite::Error> for Error {
 )]
 mod tests {
     use super::*;
-    use crate::stats::{HOUR_NS, normalize::Sample};
+    use crate::stats::HOUR_NS;
+
+    /// Upgrade a populated database from the original schema and reopen it idempotently.
+    #[test]
+    fn migrate_legacy_samples() {
+        // SQLite NOFOLLOW rejects symlinked path components, as in some CI temp roots.
+        let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().expect("temp root"))
+            .expect("temp directory");
+        let path = dir.path().join("db");
+        let legacy = Connection::open(&path).expect("legacy database");
+        legacy
+            .execute_batch(
+                "CREATE TABLE samples (
+                 harness TEXT NOT NULL, request_digest BLOB NOT NULL, time_ns INTEGER NOT NULL,
+                 provider TEXT NOT NULL, model TEXT NOT NULL, effort TEXT, input_tokens INTEGER,
+                 output_tokens INTEGER, cache_read_tokens INTEGER, cache_creation_tokens INTEGER,
+                 cache_creation_5m_tokens INTEGER, cache_creation_1h_tokens INTEGER,
+                 duration_ms REAL, ttft_ms REAL, UNIQUE(harness, request_digest)
+             ) STRICT;
+             INSERT INTO samples VALUES (
+                 'claude-code', x'0102', 42, 'anthropic', 'legacy', NULL, 12, 20,
+                 NULL, NULL, NULL, NULL, 100.0, 50.0
+             );",
+            )
+            .expect("legacy sample");
+        drop(legacy);
+        for _ in 0..2 {
+            let conn = open(&path).expect("upgrade");
+            let row: (i64, f64, String, Option<i64>) = conn
+                .query_row(
+                    "SELECT output_tokens, duration_ms, duration_source, reasoning_tokens
+                 FROM samples WHERE request_digest = x'0102' AND time_ns = 42",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .expect("legacy row");
+            assert_eq!(row, (20, 100.0, "exact".into(), None));
+        }
+    }
 
     /// Make one row with a controlled identity and timestamp.
     fn sample(id: u8, time_ns: i64) -> Sample {
         Sample {
+            harness: "claude-code",
             time_ns,
             digest: [id; 32],
             provider: "anthropic".into(),
             model: "fixture".into(),
             effort: None,
             tokens: [None; 6],
+            reasoning_tokens: None,
             duration_ms: None,
             ttft_ms: None,
         }
@@ -150,7 +250,7 @@ mod tests {
         let mut conn = open(&dir.path().join("db")).expect("database");
         let now = RETENTION_NS + HOUR_NS;
         let boundary = now - RETENTION_NS;
-        let batch = Batch {
+        let mut batch = Batch {
             samples: vec![
                 sample(1, boundary - 1),
                 sample(2, boundary),
@@ -158,8 +258,14 @@ mod tests {
             ],
             ..Batch::default()
         };
-        assert_eq!(insert(&mut conn, &batch).expect("insert"), (3, 0));
-        assert_eq!(insert(&mut conn, &batch).expect("replay"), (0, 3));
+        assert_eq!(
+            insert(&mut conn, &mut Pairing::default(), &mut batch).expect("insert"),
+            (3, 0)
+        );
+        assert_eq!(
+            insert(&mut conn, &mut Pairing::default(), &mut batch).expect("replay"),
+            (0, 3)
+        );
         assert_eq!(expire(&conn, now).expect("expire"), 1);
         let oldest: i64 = conn
             .query_row("SELECT min(time_ns) FROM samples", [], |row| row.get(0))
@@ -174,27 +280,36 @@ mod tests {
         let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().expect("temp root"))
             .expect("temp directory");
         let mut conn = open(&dir.path().join("db")).expect("database");
-        let first = Batch {
+        let mut first = Batch {
             samples: vec![sample(0, HOUR_NS)],
             ..Batch::default()
         };
-        assert_eq!(insert(&mut conn, &first).expect("baseline"), (1, 0));
+        assert_eq!(
+            insert(&mut conn, &mut Pairing::default(), &mut first).expect("baseline"),
+            (1, 0)
+        );
         let pages: u32 = conn
             .pragma_query_value(None, "page_count", |row| row.get(0))
             .expect("page count");
         conn.pragma_update(None, "max_page_count", pages)
             .expect("set SQLite cap");
-        let batch = Batch {
+        let mut batch = Batch {
             samples: (1..=255).map(|id| sample(id, HOUR_NS)).collect(),
             ..Batch::default()
         };
-        assert!(matches!(insert(&mut conn, &batch), Err(Error("disk_full"))));
+        assert!(matches!(
+            insert(&mut conn, &mut Pairing::default(), &mut batch),
+            Err(Error("disk_full"))
+        ));
         let rows: i64 = conn
             .query_row("SELECT count(*) FROM samples", [], |row| row.get(0))
             .expect("row count");
         assert_eq!(rows, 1);
         conn.pragma_update(None, "max_page_count", pages + 64)
             .expect("relax SQLite cap");
-        assert_eq!(insert(&mut conn, &batch).expect("retry"), (255, 0));
+        assert_eq!(
+            insert(&mut conn, &mut Pairing::default(), &mut batch).expect("retry"),
+            (255, 0)
+        );
     }
 }

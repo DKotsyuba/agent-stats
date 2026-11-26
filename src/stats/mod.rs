@@ -1,5 +1,6 @@
 //! Agent Stats resident service and read client.
 mod api;
+mod codex;
 mod config;
 mod http;
 mod normalize;
@@ -126,26 +127,32 @@ fn now_ns() -> i64 {
 
 /// Own the SQLite connection until all admitted write messages have completed.
 fn writer(mut conn: rusqlite::Connection, mut queue: mpsc::Receiver<Write>, counters: &Counters) {
+    let mut pairing = codex::Pairing::default();
     while let Some(message) = queue.blocking_recv() {
         match message {
-            Write::Batch(batch, reply) => {
-                let result = store::insert(&mut conn, &batch).map(|(inserted, duplicate)| {
-                    counters.inserted.add(inserted);
-                    counters.duplicate.add(duplicate);
-                });
+            Write::Batch(mut batch, reply) => {
+                let result = store::insert(&mut conn, &mut pairing, &mut batch).map(
+                    |(inserted, duplicate)| {
+                        counters.inserted.add(inserted);
+                        counters.duplicate.add(duplicate);
+                    },
+                );
                 if let Err(error) = &result {
                     counters.write_failed.add(1);
-                    counters.write_failed_records.add(batch.samples.len());
+                    counters.write_failed_records.add(batch.sample_count());
                     if error.0 == "disk_full" {
                         counters.disk_full.add(1);
                     }
                 }
                 let _ = reply.send(result);
             }
-            Write::Expire => match store::expire(&conn, now_ns()) {
-                Ok(pruned) => counters.pruned.add(pruned),
-                Err(_) => counters.retention_failed.add(1),
-            },
+            Write::Expire => {
+                pairing.expire(std::time::Instant::now());
+                match store::expire(&conn, now_ns()) {
+                    Ok(pruned) => counters.pruned.add(pruned),
+                    Err(_) => counters.retention_failed.add(1),
+                }
+            }
         }
     }
 }

@@ -123,7 +123,7 @@ async fn ingest(request: Request<Incoming>, state: &State) -> Result<(), StatusC
     state.counters.ignored.add(batch.ignored);
     state.counters.invalid.add(batch.invalid);
     state.counters.expired.add(batch.expired);
-    if batch.samples.is_empty() {
+    if batch.samples.is_empty() && batch.codex.is_empty() {
         return Ok(());
     }
 
