@@ -46,10 +46,8 @@ pub(super) fn project(
         }
     };
     let identity = || {
-        let time = chrono::DateTime::parse_from_rfc3339(string("event.timestamp")?).ok()?;
-        let time_ns = time
-            .timestamp_nanos_opt()
-            .filter(|time| *time > 0 && *time <= now)?;
+        let time_ns =
+            utc_ns(string("event.timestamp")?).filter(|time| *time > 0 && *time <= now)?;
         let conversation =
             string("conversation.id").filter(|id| !id.is_empty() && id.len() <= 512)?;
         let model = string("model").filter(|value| label(value))?;
@@ -110,6 +108,59 @@ pub(super) fn project(
         kind,
         conversation: digest(key, b"codex conversation", conversation, &[]),
     });
+}
+
+/// Parse the UTC RFC 3339 form Codex emits (`2026-11-26T22:51:33.061Z`, optional
+/// fraction up to nanoseconds, `Z` or `+00:00`) into Unix nanoseconds.
+fn utc_ns(text: &str) -> Option<i64> {
+    let text = text
+        .strip_suffix('Z')
+        .or_else(|| text.strip_suffix("+00:00"))?;
+    let (date, time) = text.split_once('T')?;
+    let field = |value: &str, len: usize| {
+        (value.len() == len && value.bytes().all(|byte| byte.is_ascii_digit()))
+            .then(|| value.parse::<i64>().ok())
+            .flatten()
+    };
+    let mut date = date.split('-');
+    let (year, month, day) = (
+        field(date.next()?, 4)?,
+        field(date.next()?, 2)?,
+        field(date.next()?, 2)?,
+    );
+    let (clock, fraction) = time.split_once('.').unwrap_or((time, ""));
+    let mut clock = clock.split(':');
+    let (hour, minute, second) = (
+        field(clock.next()?, 2)?,
+        field(clock.next()?, 2)?,
+        field(clock.next()?, 2)?,
+    );
+    if date.next().is_some()
+        || clock.next().is_some()
+        || !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 59
+        || fraction.len() > 9
+        || (time.contains('.') && fraction.is_empty())
+    {
+        return None;
+    }
+    let nanos = if fraction.is_empty() {
+        0
+    } else {
+        field(fraction, fraction.len())? * 10_i64.pow(9 - fraction.len() as u32)
+    };
+    // Days from civil (Howard Hinnant), proleptic Gregorian calendar.
+    let year = year - i64::from(month <= 2);
+    let era = year.div_euclid(400);
+    let year_of_era = year - era * 400;
+    let day_of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era * 146_097 + day_of_era - 719_468;
+    let seconds = days * 86_400 + hour * 3_600 + minute * 60 + second;
+    seconds.checked_mul(1_000_000_000)?.checked_add(nanos)
 }
 
 /// Domain-separate identities and length-prefix the variable conversation component.
@@ -242,6 +293,29 @@ impl Pairing {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// UTC timestamps convert exactly; offsets other than UTC and malformed fields are rejected.
+    #[test]
+    fn utc_timestamps() {
+        assert_eq!(utc_ns("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(
+            utc_ns("2026-11-26T22:51:33.061Z"),
+            Some(1_795_733_493_061_000_000)
+        );
+        assert_eq!(
+            utc_ns("2000-02-29T00:00:00.000000001+00:00"),
+            Some(951_782_400_000_000_001)
+        );
+        for bad in [
+            "2026-11-26T22:51:33+01:00",
+            "2026-13-01T00:00:00Z",
+            "2026-11-26T22:51:33.Z",
+            "2026-11-26 22:51:33Z",
+            "x",
+        ] {
+            assert_eq!(utc_ns(bad), None, "{bad}");
+        }
+    }
 
     /// Exclude other models, equal timestamps, consumed requests and expired observations.
     #[test]

@@ -270,10 +270,7 @@ fn codex_fixture() -> Value {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("wall clock");
-    let reference = chrono::DateTime::parse_from_rfc3339("2026-11-26T22:51:35.392Z")
-        .expect("capture end")
-        .timestamp_nanos_opt()
-        .expect("capture nanos");
+    let reference = millis("2026-11-26T22:51:35.392Z") * 1_000_000;
     let offset = i64::try_from(now.as_nanos()).expect("wall nanos") - 10_000_000_000 - reference;
     for record in export["resourceLogs"][0]["scopeLogs"][0]["logRecords"]
         .as_array_mut()
@@ -281,14 +278,8 @@ fn codex_fixture() -> Value {
     {
         for attr in record["attributes"].as_array_mut().expect("attributes") {
             if attr["key"] == "event.timestamp" {
-                let time = chrono::DateTime::parse_from_rfc3339(
-                    attr["value"]["stringValue"].as_str().expect("time"),
-                )
-                .expect("RFC3339")
-                .timestamp_nanos_opt()
-                .expect("capture nanos");
-                attr["value"]["stringValue"] =
-                    json!(chrono::DateTime::from_timestamp_nanos(time + offset).to_rfc3339());
+                let time = millis(attr["value"]["stringValue"].as_str().expect("time")) * 1_000_000;
+                attr["value"]["stringValue"] = json!(utc((time + offset).div_euclid(1_000_000)));
             }
         }
     }
@@ -505,4 +496,36 @@ fn active_request_limit_returns_429() {
         service.cli(&["status"])["counters"]["overloaded_requests"],
         1
     );
+}
+
+/// Parse the capture's `YYYY-MM-DDTHH:MM:SS.mmmZ` timestamps into Unix milliseconds.
+fn millis(text: &str) -> i64 {
+    let n = |range: std::ops::Range<usize>| text[range].parse::<i64>().expect("timestamp field");
+    let (year, month, day) = (n(0..4) - i64::from(n(5..7) <= 2), n(5..7), n(8..10));
+    let era = year.div_euclid(400);
+    let yoe = year - era * 400;
+    let doy = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let days = era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468;
+    ((days * 24 + n(11..13)) * 60 + n(14..16)) * 60_000 + n(17..19) * 1000 + n(20..23)
+}
+
+/// Format Unix milliseconds in the capture's UTC timestamp form.
+fn utc(millis: i64) -> String {
+    let (days, rest) = (millis.div_euclid(86_400_000), millis.rem_euclid(86_400_000));
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:03}Z",
+        rest / 3_600_000,
+        rest / 60_000 % 60,
+        rest / 1000 % 60,
+        rest % 1000
+    )
 }

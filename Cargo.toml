@@ -22,7 +22,6 @@ fs2 = "0.4"
 toml = "0.8"
 semver = "1"
 tempfile = "3"
-chrono = { version = "0.4", default-features = false }
 
 [package]
 name = "agent-stats"
@@ -48,7 +47,6 @@ hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 ring = "0.17"
-chrono.workspace = true
 rusqlite = { version = "=0.41.1", features = ["bundled", "hooks"] }
 rustix = { version = "1", features = ["process", "fs"] }
 subtle = "2"
