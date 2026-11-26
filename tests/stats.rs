@@ -1,4 +1,4 @@
-//! Black-box v1 service checks using the sanitized Claude Code 2.1.326 payload.
+//! Black-box v1 service checks using sanitized Claude Code and Codex captures.
 #![allow(
     clippy::expect_used,
     reason = "Test setup failures should include their cause"
@@ -42,6 +42,11 @@ struct Service {
 impl Service {
     /// Bootstrap an isolated listener, socket and private SQLite store.
     fn start() -> Self {
+        Self::start_with_limits(4096, 2)
+    }
+
+    /// Admit a capture with custom body and record limits.
+    fn start_with_limits(max_body_bytes: usize, max_records: usize) -> Self {
         let home = tempfile::Builder::new()
             .prefix("st-")
             .permissions(fs::Permissions::from_mode(0o700))
@@ -61,7 +66,7 @@ impl Service {
         fs::write(
             &config,
             format!(
-                "listen = '127.0.0.1:{port}'\nstate_dir = {:?}\nsocket = {:?}\ntoken_file = {:?}\ndigest_key_file = {:?}\nmax_body_bytes = 4096\nmax_records = 2\nmax_requests = 1\n",
+                "listen = '127.0.0.1:{port}'\nstate_dir = {:?}\nsocket = {:?}\ntoken_file = {:?}\ndigest_key_file = {:?}\nmax_body_bytes = {max_body_bytes}\nmax_records = {max_records}\nmax_requests = 1\n",
                 home.path().join("db"), socket, token, key,
             ),
         )
@@ -199,10 +204,8 @@ fn sample_replay_and_exact_aggregates() {
         metric,
         &json!({"count":2,"mean":619.0,"median":619.0,"min":594.0,"max":644.0,"p10":599.0,"p90":639.0})
     );
-    let speed = group["metrics"]["speed_tokens_per_second"]["median"]
-        .as_f64()
-        .expect("speed");
-    assert!((speed - 500.0).abs() < 1e-9);
+    assert!(group["metrics"]["speed_tokens_per_second"]["median"].is_null());
+    assert_eq!(group["metrics"]["speed_estimated"], false);
 
     let series = service.cli(&[
         "series",
@@ -257,6 +260,161 @@ fn sample_replay_and_exact_aggregates() {
                 .any(|part| part == canary.as_bytes())
         );
     }
+}
+
+/// Rebase the capture into the rolling window without changing event intervals.
+fn codex_fixture() -> Value {
+    let mut export: Value =
+        serde_json::from_str(include_str!("codex_events.json")).expect("Codex capture");
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("wall clock");
+    let reference = chrono::DateTime::parse_from_rfc3339("2026-11-26T22:51:35.392Z")
+        .expect("capture end")
+        .timestamp_nanos_opt()
+        .expect("capture nanos");
+    let offset = i64::try_from(now.as_nanos()).expect("wall nanos") - 10_000_000_000 - reference;
+    for record in export["resourceLogs"][0]["scopeLogs"][0]["logRecords"]
+        .as_array_mut()
+        .expect("capture records")
+    {
+        for attr in record["attributes"].as_array_mut().expect("attributes") {
+            if attr["key"] == "event.timestamp" {
+                let time = chrono::DateTime::parse_from_rfc3339(
+                    attr["value"]["stringValue"].as_str().expect("time"),
+                )
+                .expect("RFC3339")
+                .timestamp_nanos_opt()
+                .expect("capture nanos");
+                attr["value"]["stringValue"] =
+                    json!(chrono::DateTime::from_timestamp_nanos(time + offset).to_rfc3339());
+            }
+        }
+    }
+    export
+}
+
+/// Verify exact fields, one-request pairs, ambiguity, replay and CLI provenance.
+#[test]
+fn codex_capture_ingestion() {
+    let service = Service::start_with_limits(65_536, 32);
+    let export = codex_fixture();
+    for _ in 0..2 {
+        assert_eq!(
+            service.post(TOKEN, "application/json", &export.to_string()),
+            200
+        );
+    }
+    let status = service.cli(&["status"]);
+    assert_eq!(status["counters"]["inserted_records"], 3);
+    assert_eq!(status["counters"]["duplicate_records"], 3);
+    assert_eq!(status["counters"]["ignored_records"], 16);
+    let conn =
+        rusqlite::Connection::open(service.home.path().join("db/stats.sqlite3")).expect("database");
+    let durations: Vec<(Option<f64>, Option<String>)> = conn
+        .prepare("SELECT duration_ms, duration_source FROM samples ORDER BY time_ns")
+        .expect("durations")
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("query")
+        .collect::<Result<_, _>>()
+        .expect("rows");
+    assert_eq!(
+        durations,
+        vec![
+            (Some(256.0), Some("estimated".into())),
+            (Some(173.0), Some("estimated".into())),
+            (None, None)
+        ]
+    );
+    let exact: (String, String, String, String, i64, i64, i64, i64, i64, f64, i64) = conn.query_row(
+        "SELECT harness, provider, model, effort, input_tokens, output_tokens, cache_read_tokens,
+                cache_creation_tokens, reasoning_tokens, ttft_ms, length(request_digest)
+         FROM samples ORDER BY time_ns DESC LIMIT 1",
+        [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?,
+                      row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?, row.get(10)?))
+    ).expect("completion fields");
+    assert_eq!(
+        exact,
+        (
+            "codex".into(),
+            "openai".into(),
+            "gpt-6-luna".into(),
+            "low".into(),
+            29290,
+            30,
+            11648,
+            0,
+            0,
+            451.0,
+            32
+        )
+    );
+    let db = fs::read(service.home.path().join("db/stats.sqlite3")).expect("database bytes");
+    assert!(
+        !db.windows(b"fixture-conversation".len())
+            .any(|part| part == b"fixture-conversation")
+    );
+    let data = service.cli(&["stats", "--group-by", "harness+model"]);
+    let group = &data["groups"][1];
+    assert_eq!(
+        group["key"],
+        json!({"harness":"codex","model":"gpt-6-luna"})
+    );
+    assert_eq!(group["metrics"]["count"], 2);
+    assert_eq!(group["metrics"]["ttft_ms"]["mean"], 451.0);
+    assert_eq!(group["metrics"]["speed_tokens_per_second"]["count"], 0);
+    assert_eq!(group["metrics"]["speed_estimated"], false);
+}
+
+/// Pair request-only batches and expose the estimate in stats and its UTC series bucket.
+#[test]
+fn codex_pairing_across_batches() {
+    let service = Service::start();
+    let mut export = codex_fixture();
+    let path = "/resourceLogs/0/scopeLogs/0/logRecords";
+    let records = export
+        .pointer(path)
+        .and_then(Value::as_array)
+        .expect("capture records");
+    let request = records[12].clone();
+    let completion = records[14].clone();
+    for record in [request, completion.clone(), completion] {
+        *export.pointer_mut(path).expect("record array") = json!([record]);
+        assert_eq!(
+            service.post(TOKEN, "application/json", &export.to_string()),
+            200
+        );
+    }
+    let stats = service.cli(&["stats"]);
+    let group = &stats["groups"][0];
+    assert_eq!(group["key"], json!({"model":"gpt-6-luna"}));
+    let metrics = &group["metrics"];
+    assert_eq!(metrics["count"], 1);
+    assert_eq!(metrics["speed_estimated"], true);
+    assert_eq!(metrics["speed_tokens_per_second"]["count"], 1);
+    assert!(
+        (metrics["speed_tokens_per_second"]["mean"]
+            .as_f64()
+            .expect("speed")
+            - 30_000.0 / 524.0)
+            .abs()
+            < 1e-9
+    );
+    let series = service.cli(&["series", "--model", "gpt-6-luna", "--bucket", "hour"]);
+    let buckets = series["buckets"].as_array().expect("series");
+    assert_eq!(
+        buckets
+            .iter()
+            .filter(|bucket| bucket["metrics"] == *metrics)
+            .count(),
+        1
+    );
+    assert!(
+        buckets
+            .iter()
+            .filter(|bucket| bucket["metrics"]["count"] == 0)
+            .all(|bucket| bucket["metrics"]["speed_estimated"] == false)
+    );
 }
 
 /// Check that malformed, unauthorized, unsupported and oversized requests fail independently.

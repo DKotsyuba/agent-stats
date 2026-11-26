@@ -6,6 +6,9 @@ Target version: 0.1.0.
 
 ### Changed
 
+- Require at least 20 output tokens and 50 ms after the first token for speed
+  aggregates. TTFT eligibility is unchanged.
+
 - `cargo xtask check` follows the Rust gate standard: tests run under cargo-nextest (required; CI installs 0.9.149 from a checksum-verified archive) with every failure reported, doctests via `cargo test --doc`, and test temporaries in a fresh tmpfs directory (`XTASK_TEST_TMPFS=0` opts out). Integration tests build into one `it` binary: every `tests/*.rs` must be a module of `tests/it/main.rs`. Release acceptance runs `--test it <suite>::` filters and refuses a filter that selects no tests. The dev profile keeps line-table debug info only (`--profile debugging` for full).
 - Run release checks and payload construction in parallel while keeping publication gated on both.
 - Seed separate check/package dependency caches from main; document focused checks for local iteration.
@@ -18,6 +21,10 @@ Target version: 0.1.0.
 - Raw stdio regression tests cover modern/legacy tools/list and modern server/discover; supported protocol revisions are explicit.
 
 ### Added
+
+- Ingest Codex OTLP logs with exact reported metrics and estimated durations for
+  unambiguous WebSocket pairs. Add `speed_estimated` to stats and series metrics
+  and `harness+model` to stats groupings.
 
 - Add a loopback OTLP/HTTP JSON receiver for Claude Code model calls and a private
   30-day SQLite store with keyed request deduplication.

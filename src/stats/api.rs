@@ -42,6 +42,9 @@ pub(crate) enum Group {
     #[serde(rename = "provider+model")]
     #[value(name = "provider+model")]
     ProviderModel,
+    #[serde(rename = "harness+model")]
+    #[value(name = "harness+model")]
+    HarnessModel,
     #[serde(rename = "model+effort")]
     #[value(name = "model+effort")]
     ModelEffort,
@@ -84,22 +87,30 @@ pub(crate) enum Operation {
 struct Metrics {
     count: usize,
     speed: Vec<f64>,
+    speed_estimated: bool,
     ttft: Vec<f64>,
 }
 
 impl Metrics {
     /// Count every row, with independent eligibility for speed and TTFT.
-    fn push(&mut self, output: Option<i64>, duration: Option<f64>, ttft: Option<f64>) {
+    fn push(
+        &mut self,
+        output: Option<i64>,
+        duration: Option<f64>,
+        ttft: Option<f64>,
+        estimated: bool,
+    ) {
         self.count += 1;
         if let Some(ttft) = ttft {
             self.ttft.push(ttft);
             if let (Some(output), Some(duration)) = (output, duration)
-                && output > 0
-                && duration > ttft
+                && output >= 20
+                && duration - ttft >= 50.0
             {
                 let speed = output as f64 * 1000.0 / (duration - ttft);
                 if speed.is_finite() {
                     self.speed.push(speed);
+                    self.speed_estimated |= estimated;
                 }
             }
         }
@@ -110,6 +121,7 @@ impl Metrics {
         json!({
             "count": self.count,
             "speed_tokens_per_second": summary(self.speed),
+            "speed_estimated": self.speed_estimated,
             "ttft_ms": summary(self.ttft),
         })
     }
@@ -138,6 +150,26 @@ fn summary(mut values: Vec<f64>) -> Value {
         "max": values[last], "p10": percentile(0.1), "p90": percentile(0.9)})
 }
 
+#[cfg(test)]
+mod tests {
+    use super::Metrics;
+
+    /// Both thresholds are inclusive, and only eligible estimates flag a group.
+    #[test]
+    fn speed_thresholds_and_provenance() {
+        let mut metrics = Metrics::default();
+        metrics.push(Some(19), Some(200.0), Some(100.0), true);
+        metrics.push(Some(20), Some(149.0), Some(100.0), true);
+        metrics.push(Some(20), Some(150.0), Some(100.0), false);
+        let result = metrics.finish();
+        assert_eq!(result["count"], 3);
+        assert_eq!(result["ttft_ms"]["count"], 3);
+        assert_eq!(result["speed_tokens_per_second"]["count"], 1);
+        assert_eq!(result["speed_tokens_per_second"]["mean"], 400.0);
+        assert_eq!(result["speed_estimated"], false);
+    }
+}
+
 /// A group key owns only dimensions requested by the caller.
 #[derive(Ord, PartialOrd, Eq, PartialEq, Serialize)]
 struct Key {
@@ -146,6 +178,8 @@ struct Key {
     provider: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     effort: Option<Option<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    harness: Option<String>,
 }
 
 /// Evaluate one validated request against a read-only snapshot.
@@ -187,10 +221,12 @@ pub(super) fn read(
     };
 
     let sql = if model.is_some() {
-        "SELECT time_ns, model, provider, effort, output_tokens, duration_ms, ttft_ms
+        "SELECT time_ns, model, provider, effort, output_tokens, duration_ms, ttft_ms,
+                harness, duration_source IS 'estimated'
          FROM samples WHERE time_ns BETWEEN ?1 AND ?2 AND model = ?4 LIMIT ?3"
     } else {
-        "SELECT time_ns, model, provider, effort, output_tokens, duration_ms, ttft_ms
+        "SELECT time_ns, model, provider, effort, output_tokens, duration_ms, ttft_ms,
+                harness, duration_source IS 'estimated'
          FROM samples WHERE time_ns BETWEEN ?1 AND ?2 LIMIT ?3"
     };
     let mut statement = conn.prepare(sql)?;
@@ -221,6 +257,10 @@ pub(super) fn read(
                         Group::ModelEffort => Some(row.get(3)?),
                         _ => None,
                     },
+                    harness: match group_by {
+                        Group::HarnessModel => Some(row.get(7)?),
+                        _ => None,
+                    },
                 };
                 groups.entry(key).or_default()
             }
@@ -231,7 +271,7 @@ pub(super) fn read(
             }
             Operation::Status => return Err(Error("invalid_request")),
         };
-        metrics.push(row.get(4)?, row.get(5)?, row.get(6)?);
+        metrics.push(row.get(4)?, row.get(5)?, row.get(6)?, row.get(8)?);
         if groups.len() > MAX_GROUPS {
             return Err(Error("query_too_large"));
         }

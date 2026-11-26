@@ -6,23 +6,38 @@ use serde_json::{Map, Value, value::RawValue};
 
 /// One model call. A missing metric cannot invalidate a different metric.
 pub(super) struct Sample {
+    pub harness: &'static str,
     pub time_ns: i64,
     pub digest: [u8; 32],
     pub provider: String,
     pub model: String,
     pub effort: Option<String>,
     pub tokens: [Option<i64>; 6],
+    pub reasoning_tokens: Option<i64>,
     pub duration_ms: Option<f64>,
     pub ttft_ms: Option<f64>,
 }
 
-/// Normalized batch and OTLP record-level drop counts.
+/// Normalized samples, Codex pairing events and OTLP record-level drop counts.
 #[derive(Default)]
 pub(super) struct Batch {
     pub samples: Vec<Sample>,
+    pub codex: Vec<super::codex::Event>,
     pub ignored: usize,
     pub invalid: usize,
     pub expired: usize,
+}
+
+impl Batch {
+    /// Count records eligible for storage, including Codex completions awaiting pairing.
+    pub(super) fn sample_count(&self) -> usize {
+        self.samples.len()
+            + self
+                .codex
+                .iter()
+                .filter(|event| matches!(event.kind, super::codex::Kind::Completed(_)))
+                .count()
+    }
 }
 
 #[derive(Deserialize)]
@@ -95,11 +110,12 @@ pub(super) fn normalize(
             .as_ref()
             .and_then(|body| body.name)
             .and_then(|name| serde_json::from_str::<String>(name.get()).ok());
+        let attributes = decode_attributes(record.attributes);
         if event.as_deref() != Some("claude_code.api_request") {
-            batch.ignored += 1;
+            super::codex::project(&attributes, key, now, &mut batch);
             continue;
         }
-        match sample(record, config, key) {
+        match sample(&record.time_unix_nano, &attributes, config, key) {
             Some(sample) if sample.time_ns < now - RETENTION_NS => batch.expired += 1,
             Some(sample) if sample.time_ns <= now => batch.samples.push(sample),
             _ => batch.invalid += 1,
@@ -108,10 +124,12 @@ pub(super) fn normalize(
     Ok(batch)
 }
 
-/// Build a sample only when identity and timestamp can support storage and deduplication.
-fn sample(record: Record<'_>, config: &Config, key: &hmac::Key) -> Option<Sample> {
-    let input: Vec<Attribute<'_>> = serde_json::from_str(record.attributes?.get()).ok()?;
-    let attributes: Map<String, Value> = input
+/// Decode only allowlisted attributes.
+fn decode_attributes(raw: Option<&RawValue>) -> Map<String, Value> {
+    let input: Vec<Attribute<'_>> = raw
+        .and_then(|value| serde_json::from_str(value.get()).ok())
+        .unwrap_or_default();
+    input
         .into_iter()
         .filter(|attribute| {
             matches!(
@@ -132,6 +150,16 @@ fn sample(record: Record<'_>, config: &Config, key: &hmac::Key) -> Option<Sample
                     | "cache_creation_tokens"
                     | "cache_creation_5m_tokens"
                     | "cache_creation_1h_tokens"
+                    | "event.name"
+                    | "event.kind"
+                    | "event.timestamp"
+                    | "conversation.id"
+                    | "model_reasoning_effort"
+                    | "input_token_count"
+                    | "output_token_count"
+                    | "cached_token_count"
+                    | "cache_write_token_count"
+                    | "reasoning_token_count"
             )
         })
         .filter_map(|attribute| {
@@ -140,7 +168,16 @@ fn sample(record: Record<'_>, config: &Config, key: &hmac::Key) -> Option<Sample
                 serde_json::from_str(attribute.value.get()).ok()?,
             ))
         })
-        .collect();
+        .collect()
+}
+
+/// Build a Claude sample only when identity and timestamp support deduplication.
+fn sample(
+    time: &Value,
+    attributes: &Map<String, Value>,
+    config: &Config,
+    key: &hmac::Key,
+) -> Option<Sample> {
     let string = |name: &str| attributes.get(name)?.get("stringValue")?.as_str();
     let model = string("model").filter(|value| label(value))?;
     // Custom gateways (OpenCode Go, Z.ai) may omit the provider request id; Claude Code always sets its own
@@ -184,7 +221,8 @@ fn sample(record: Record<'_>, config: &Config, key: &hmac::Key) -> Option<Sample
             .filter(|value| value.is_finite() && (0.0..=i64::MAX as f64).contains(value))
     };
     Some(Sample {
-        time_ns: integer(&record.time_unix_nano).filter(|time| *time > 0)?,
+        harness: "claude-code",
+        time_ns: integer(time).filter(|time| *time > 0)?,
         digest: hmac::sign(key, id.as_bytes()).as_ref().try_into().ok()?,
         provider: provider.to_owned(),
         model: model.to_owned(),
@@ -200,13 +238,14 @@ fn sample(record: Record<'_>, config: &Config, key: &hmac::Key) -> Option<Sample
             "cache_creation_1h_tokens",
         ]
         .map(|name| integer(&attributes.get(name)?["intValue"]).filter(|value| *value >= 0)),
+        reasoning_tokens: None,
         duration_ms: metric("duration_ms"),
         ttft_ms: metric("ttft_ms"),
     })
 }
 
 /// Accept protobuf JSON integers in string and numeric encodings.
-fn integer(value: &Value) -> Option<i64> {
+pub(super) fn integer(value: &Value) -> Option<i64> {
     value.as_i64().or_else(|| value.as_str()?.parse().ok())
 }
 

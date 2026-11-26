@@ -1,8 +1,10 @@
 # agent-stats
 
-Agent Stats records per-model Claude Code performance via authenticated loopback
-OTLP/HTTP. It keeps 30 days of raw samples in private SQLite and serves exact speed
-and time-to-first-token aggregates over a peer-UID-authorized Unix socket.
+Agent Stats records per-model Claude Code and Codex performance via authenticated
+loopback OTLP/HTTP. It keeps 30 days of raw samples in private SQLite and serves
+speed and time-to-first-token aggregates over a peer-UID-authorized Unix socket.
+Speed aggregates that include estimated Codex durations carry the
+`speed_estimated` flag.
 
 ## Run and read
 
@@ -14,9 +16,23 @@ agent-stats series --model claude-haiku-5-5 --bucket hour --window 24h
 ```
 
 The read commands default to `/run/agent-stats/read.sock` and accept `--socket`.
-See [installation and Claude setup](docs/install.md) and the [Hub socket
+See [installation and exporter setup](docs/install.md) and the [Hub socket
 contract](docs/architecture.md#hub-socket-protocol-v1). The bundled stdio
 MCP endpoint exposes the existing `get_status` identity tool.
+
+## Enable Codex
+
+Add the OTLP log exporter to your Codex configuration and replace `<token>`
+with the Agent Stats ingest token.
+
+```toml
+[otel]
+exporter = { otlp-http = { endpoint = "http://127.0.0.1:4318/v1/logs", protocol = "json", headers = { "x-stats-token" = "<token>" } } }
+log_user_prompt = false
+```
+
+Use `agent-stats stats --group-by harness+model` to see Codex and Claude Code
+in separate groups. See [Codex configuration and verification](docs/install.md#enable-codex).
 
 ## Development
 

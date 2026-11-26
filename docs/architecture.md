@@ -9,7 +9,7 @@ connection limit, excess connections are closed before parsing. Request
 overload returns 429, size or record overflow 413, and unsupported content
 type or encoding 415. Corrupt JSON returns 400 and bad authentication 401.
 
-The normalizer selects only the `claude_code.api_request` event body name and
+For Claude Code, the normalizer selects the `claude_code.api_request` event body name and
 projects its allowlisted fields before passing rows to the writer. Model,
 request ID and event timestamp are required. Invalid optional fields are
 absent, so a call can count even when a metric is unavailable. Provider is
@@ -22,6 +22,19 @@ with a separate service secret. The harness and digest together deduplicate
 retries, including across service restarts with the same key. Timestamps are
 Unix nanoseconds. Future timestamps are invalid and timestamps older than
 30 days are expired.
+
+For Codex, the normalizer selects `codex.sse_event` records with
+`event.kind=response.completed` and reads the model, effort, token counts,
+TTFT and RFC 3339 event timestamp from allowlisted attributes. It uses
+`codex` as the harness and `openai` as the provider. A keyed digest of
+conversation ID, event timestamp and model deduplicates completions. The
+raw conversation ID is discarded before the writer receives the event.
+The writer tracks `codex.websocket_request` events in bounded memory for
+up to 15 minutes. A completion has an estimated duration when one strictly
+earlier request matches its model and conversation since the previous
+completion. Ambiguous or missing pairs yield a null duration. The store
+records `estimated` for Codex pairs and `exact` for Claude Code rows,
+including rows migrated from the original schema.
 
 The writer commits one batch atomically and responds with HTTP 200 only after
 successful persistence or when the batch has no eligible records. Database
@@ -54,7 +67,7 @@ Unauthorized peers are closed without a reply.
 - `model_stats` returns `window`, `group_by` and `groups`. Each group has a
   `key` with `model` and the requested additional dimension, and a `metrics`
   object. Windows are `24h`, `7d`, `30d`. Groupings are `model`,
-  `provider+model` and `model+effort`. Missing effort is JSON null.
+  `provider+model`, `model+effort` and `harness+model`. Missing effort is JSON null.
 - `model_series` returns `window`, `model`, `bucket` and ascending `buckets`,
   each with `start_unix_ns` as a decimal string and `metrics`. Buckets are
   UTC-aligned `hour` or `day`, with empty buckets included. The window may
@@ -70,8 +83,10 @@ has its own eligible `count`, plus `mean`, `median`, `min`, `max`, `p10`
 and `p90` (all null when that distribution is empty). Percentiles use exact
 raw samples with linear interpolation at rank `(n−1)p`. Speed is a
 client-observed estimate of `output_tokens × 1000 / (duration_ms − ttft_ms)`
-when output is positive, TTFT is nonnegative, and duration exceeds TTFT.
-TTFT is independent of speed. Reads exceeding 100,000 eligible rows for the
+when output is at least 20 tokens and duration minus TTFT is at least 50 ms.
+The metrics object includes `speed_estimated`, true when any contributing
+speed sample uses an estimated duration. TTFT is independent of speed.
+Reads exceeding 100,000 eligible rows for the
 request or 1024 groups fail with `query_too_large`, preserving exactness.
 
 ## Template delivery
