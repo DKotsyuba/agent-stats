@@ -242,7 +242,9 @@ mod tests {
     /// Expiry and dedup preserve an event at exactly 30 days and delete older events.
     #[test]
     fn retention_boundary() {
-        let dir = tempfile::tempdir().expect("temp directory");
+        // SQLite NOFOLLOW rejects symlinked path components, as in some CI temp roots.
+        let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().expect("temp root"))
+            .expect("temp directory");
         let mut conn = open(&dir.path().join("db")).expect("database");
         let now = RETENTION_NS + HOUR_NS;
         let boundary = now - RETENTION_NS;
@@ -272,7 +274,9 @@ mod tests {
     /// Force SQLite's FULL path and verify the whole failed transaction rolls back.
     #[test]
     fn disk_full_rolls_back_batch() {
-        let dir = tempfile::tempdir().expect("temp directory");
+        // SQLite NOFOLLOW rejects symlinked path components, as in some CI temp roots.
+        let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().expect("temp root"))
+            .expect("temp directory");
         let mut conn = open(&dir.path().join("db")).expect("database");
         let mut first = Batch {
             samples: vec![sample(0, HOUR_NS)],

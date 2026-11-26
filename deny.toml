@@ -1,6 +1,9 @@
 # Reviewed baseline allowlist, not an assertion that every future dependency is acceptable.
 [advisories]
 yanked = "deny"
+# Owner decision 2026-11-27: chrono (via rmcp/schemars) is flagged unmaintained with no safe upgrade;
+# only direct dependencies are held to the unmaintained rule.
+unmaintained = "workspace"
 
 [licenses]
 allow = ["MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib"]
