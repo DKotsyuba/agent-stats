@@ -190,7 +190,9 @@ mod tests {
     /// Upgrade a populated database from the original schema and reopen it idempotently.
     #[test]
     fn migrate_legacy_samples() {
-        let dir = tempfile::tempdir().expect("temp directory");
+        // SQLite NOFOLLOW rejects symlinked path components, as in some CI temp roots.
+        let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().expect("temp root"))
+            .expect("temp directory");
         let path = dir.path().join("db");
         let legacy = Connection::open(&path).expect("legacy database");
         legacy
