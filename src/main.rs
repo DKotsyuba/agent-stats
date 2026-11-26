@@ -1,5 +1,7 @@
 //! Rust MCP application; protocol, presentation and deployment have separate boundaries.
 mod response;
+#[cfg(unix)]
+mod stats;
 mod tools;
 use clap::{Parser, Subcommand};
 use mcp_presentation::Renderer;
@@ -12,13 +14,47 @@ use std::{path::PathBuf, process::ExitCode, sync::Arc};
 const TOOLS_LIST_TTL_MS: u64 = 60_000;
 
 #[derive(Parser)]
-#[command(version, about = concat!(env!("CARGO_PKG_NAME"), " MCP server"))]
+#[command(version, about = "Agent Stats telemetry service and CLI")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
 }
 #[derive(Subcommand)]
 enum Commands {
+    /// Run the authenticated OTLP receiver and local read socket.
+    #[cfg(unix)]
+    Serve {
+        #[arg(long)]
+        config: PathBuf,
+    },
+    /// Read exact rolling model aggregates as versioned JSON.
+    #[cfg(unix)]
+    Stats {
+        #[arg(long, default_value = stats::SOCKET)]
+        socket: PathBuf,
+        #[arg(long, value_enum, default_value = "24h")]
+        window: stats::Window,
+        #[arg(long, value_enum, default_value = "model")]
+        group_by: stats::Group,
+    },
+    /// Read UTC-aligned model buckets as versioned JSON.
+    #[cfg(unix)]
+    Series {
+        #[arg(long, default_value = stats::SOCKET)]
+        socket: PathBuf,
+        #[arg(long)]
+        model: String,
+        #[arg(long, value_enum, default_value = "hour")]
+        bucket: stats::Bucket,
+        #[arg(long, value_enum, default_value = "24h")]
+        window: stats::Window,
+    },
+    /// Read service counters and the last sample time as versioned JSON.
+    #[cfg(unix)]
+    Status {
+        #[arg(long, default_value = stats::SOCKET)]
+        socket: PathBuf,
+    },
     /// Run the protocol-only stdio endpoint.
     Mcp,
     /// Check local resources, without credentials, network or mutation.
@@ -150,6 +186,39 @@ fn qualification() -> &'static str {
 #[tokio::main]
 async fn main() -> ExitCode {
     match Cli::parse().command {
+        #[cfg(unix)]
+        Commands::Serve { config } => match stats::serve(&config).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("serve: {error}");
+                ExitCode::FAILURE
+            }
+        },
+        #[cfg(unix)]
+        Commands::Stats {
+            socket,
+            window,
+            group_by,
+        } => stats_read(&socket, stats::Operation::ModelStats { window, group_by }).await,
+        #[cfg(unix)]
+        Commands::Series {
+            socket,
+            model,
+            bucket,
+            window,
+        } => {
+            stats_read(
+                &socket,
+                stats::Operation::ModelSeries {
+                    model,
+                    bucket,
+                    window,
+                },
+            )
+            .await
+        }
+        #[cfg(unix)]
+        Commands::Status { socket } => stats_read(&socket, stats::Operation::Status).await,
         Commands::SelfInstall {
             bundle,
             home,
@@ -215,6 +284,22 @@ async fn main() -> ExitCode {
                     ExitCode::FAILURE
                 }
             }
+        }
+    }
+}
+
+/// Print the versioned socket reply and propagate application errors via exit status.
+#[cfg(unix)]
+async fn stats_read(socket: &std::path::Path, operation: stats::Operation) -> ExitCode {
+    match stats::call(socket, operation).await {
+        Ok(reply) => {
+            let ok = reply["ok"].as_bool() == Some(true);
+            let written = print_json(reply);
+            if ok { written } else { ExitCode::FAILURE }
+        }
+        Err(error) => {
+            eprintln!("read: {error}");
+            ExitCode::FAILURE
         }
     }
 }

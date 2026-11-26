@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+Target version: 0.1.0.
+
 ### Changed
 
 - `cargo xtask check` follows the Rust gate standard: tests run under cargo-nextest (required; CI installs 0.9.149 from a checksum-verified archive) with every failure reported, doctests via `cargo test --doc`, and test temporaries in a fresh tmpfs directory (`XTASK_TEST_TMPFS=0` opts out). Integration tests build into one `it` binary: every `tests/*.rs` must be a module of `tests/it/main.rs`. Release acceptance runs `--test it <suite>::` filters and refuses a filter that selects no tests. The dev profile keeps line-table debug info only (`--profile debugging` for full).
@@ -17,6 +19,11 @@
 
 ### Added
 
+- Add a loopback OTLP/HTTP JSON receiver for Claude Code model calls and a private
+  30-day SQLite store with keyed request deduplication.
+- Expose exact model aggregates, UTC series and service status through a
+  peer-UID-authorized Unix socket and CLI.
+- Provide a systemd unit, example configuration and Claude Code setup instructions.
 - Initial agent-stats working set: the read-only `get_status` identity tool and
   the local development gate.
 

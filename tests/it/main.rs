@@ -4,3 +4,7 @@
 
 #[path = "../protocol.rs"]
 mod protocol;
+
+#[cfg(unix)]
+#[path = "../stats.rs"]
+mod stats;

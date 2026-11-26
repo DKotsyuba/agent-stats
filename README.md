@@ -1,17 +1,22 @@
 # agent-stats
 
-<!-- Replace this paragraph with your product's purpose: what it does for its
-caller and what it deliberately never does. -->
-A stdio MCP server. Repository: DKotsyuba/agent-stats.
-Read AGENTS.md and docs/MCP_RESPONSE_STANDARD.md before adding tools.
+Agent Stats records per-model Claude Code performance via authenticated loopback
+OTLP/HTTP. It keeps 30 days of raw samples in private SQLite and serves exact speed
+and time-to-first-token aggregates over a peer-UID-authorized Unix socket.
 
-## Tools
+## Run and read
 
-| Tool | Effect | Purpose |
-|---|---|---|
-| `get_status` | read | product identity and release qualification status |
+```bash
+agent-stats serve --config /etc/agent-stats/agent-stats.toml
+agent-stats status
+agent-stats stats --window 7d --group-by provider+model
+agent-stats series --model claude-haiku-5-5 --bucket hour --window 24h
+```
 
-Replace this table with the product's real tools as their contracts are implemented.
+The read commands default to `/run/agent-stats/read.sock` and accept `--socket`.
+See [installation and Claude setup](docs/install.md) and the [Hub socket
+contract](docs/architecture.md#hub-socket-protocol-v1). The bundled stdio
+MCP endpoint exposes the existing `get_status` identity tool.
 
 ## Development
 
@@ -61,8 +66,7 @@ cargo xtask package verify dist/agent-stats-0.1.0-aarch64-apple-darwin
 The bundle executable accepts `self-install --bundle PATH --home ABS_PATH --bin-dir ABS_PATH`.
 Create the bin directory explicitly. Installation preserves immutable versions, never restarts
 services and does not edit MCP host configuration. `releases use VERSION` verifies and selects
-a retained compatible version. This profile has no local data migration; external effects are
-not undone by a binary rollback. No automatic pruning or removal of user data.
+a retained compatible version. Binary rollback preserves the service database and credentials. The installer preserves user data. The service expires raw samples after 30 days.
 
 CI restores Cargo dependency builds and a versioned cargo-deny tool cache. Successful
 main check jobs warm the check cache; an independent main-only package job warms
