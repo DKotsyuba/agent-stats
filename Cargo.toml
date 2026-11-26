@@ -38,10 +38,18 @@ mcp-presentation = { path = "crates/mcp-presentation" }
 family-delivery = { path = "crates/family-delivery" }
 rmcp.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
 minijinja.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["net", "signal", "io-util", "sync"] }
 toml.workspace = true
+fs2.workspace = true
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+ring = "0.17"
+rusqlite = { version = "=0.41.1", features = ["bundled", "hooks"] }
+rustix = { version = "1", features = ["process", "fs"] }
+subtle = "2"
 
 [dev-dependencies]
 rmcp = { workspace = true, features = ["client", "transport-child-process"] }
