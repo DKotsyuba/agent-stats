@@ -45,7 +45,8 @@ impl Service {
         let home = tempfile::Builder::new()
             .prefix("st-")
             .permissions(fs::Permissions::from_mode(0o700))
-            .tempdir()
+            // SQLite NOFOLLOW rejects symlinked path components, as in some CI temp roots.
+            .tempdir_in(std::env::temp_dir().canonicalize().expect("temp root"))
             .expect("test directory");
         let token = home.path().join("token");
         let key = home.path().join("key");
