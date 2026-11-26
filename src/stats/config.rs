@@ -23,6 +23,9 @@ pub(super) struct Config {
     pub token_file: PathBuf,
     pub digest_key_file: PathBuf,
     pub provider_labels: BTreeMap<String, String>,
+    /// Model-name prefix → provider label for custom gateways that report no base URL
+    /// (e.g. `"glm-" = "zai"`); the longest matching prefix wins.
+    pub model_providers: BTreeMap<String, String>,
     pub max_body_bytes: usize,
     pub max_records: usize,
     pub max_requests: usize,
@@ -39,6 +42,7 @@ impl Default for Config {
             token_file: "/etc/agent-stats/ingest.token".into(),
             digest_key_file: "/etc/agent-stats/digest.key".into(),
             provider_labels: BTreeMap::new(),
+            model_providers: BTreeMap::new(),
             max_body_bytes: 512 * 1024,
             max_records: 512,
             max_requests: 8,
@@ -73,7 +77,12 @@ impl Config {
             || config
                 .provider_labels
                 .values()
+                .chain(config.model_providers.values())
                 .any(|value| !normalize::label(value))
+            || config
+                .model_providers
+                .keys()
+                .any(|prefix| !normalize::label(prefix))
         {
             return Err(Error("invalid_config"));
         }

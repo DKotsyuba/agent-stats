@@ -15,3 +15,11 @@ write_backlog = 8
 [provider_labels]
 # Applied only if an api_request supplies anthropic.base_url and custom_base_url=true.
 # "https://example.invalid/anthropic" = "example"
+
+[model_providers]
+# Custom gateways do not report their base URL; map model-name prefixes to providers.
+"glm-" = "zai"
+"deepseek-" = "opencode-go"
+"hy4" = "opencode-go"
+"hungerg" = "opencode-go"
+"beam" = "opencode-go"

@@ -165,6 +165,14 @@ fn sample(record: Record<'_>, config: &Config, key: &hmac::Key) -> Option<Sample
         Some(false) => "anthropic",
         Some(true) => string("anthropic.base_url")
             .and_then(|url| config.provider_labels.get(url))
+            .or_else(|| {
+                config
+                    .model_providers
+                    .iter()
+                    .filter(|(prefix, _)| model.starts_with(prefix.as_str()))
+                    .max_by_key(|(prefix, _)| prefix.len())
+                    .map(|(_, label)| label)
+            })
             .map_or("custom", String::as_str),
         None => "unknown",
     };
@@ -252,6 +260,17 @@ mod tests {
             .insert("https://example.invalid".into(), "example".into());
         let batch = normalize(body.as_bytes(), &config, &key, time).expect("normalize");
         assert_eq!(batch.samples[0].provider, "example");
+        // Without a base URL the model prefix decides; the longest prefix wins.
+        config.provider_labels.clear();
+        let model = batch.samples[0].model.clone();
+        config
+            .model_providers
+            .insert(model[..1].to_owned(), "short".into());
+        config
+            .model_providers
+            .insert(model[..3].to_owned(), "long".into());
+        let batch = normalize(body.as_bytes(), &config, &key, time).expect("normalize");
+        assert_eq!(batch.samples[0].provider, "long");
     }
 
     /// Custom gateways may omit request_id; the client request id still identifies the call, and
