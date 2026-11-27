@@ -1,13 +1,55 @@
 [
   {
-    "name": "get_status",
-    "description": "Report the product identity and scaffold qualification status. Read-only; does not access files or external services.",
-    "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false},
     "annotations": {
-      "readOnlyHint": true,
       "destructiveHint": false,
       "idempotentHint": true,
-      "openWorldHint": false
-    }
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Report the product identity and scaffold qualification status. Read-only; does not access files or external services.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    },
+    "name": "get_status"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Compare model speed, time to first token, and call volume over a rolling window.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "group_by": {
+          "default": "model",
+          "enum": [
+            "model",
+            "provider+model",
+            "harness+model"
+          ],
+          "type": "string"
+        },
+        "model": {
+          "description": "Exact model identifier",
+          "type": "string"
+        },
+        "window": {
+          "default": "24h",
+          "enum": [
+            "24h",
+            "7d",
+            "30d"
+          ],
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "name": "model_stats"
   }
 ]

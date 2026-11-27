@@ -37,6 +37,13 @@ const HTTP_CONNECTION_HEADROOM: usize = 16;
 #[derive(Debug)]
 pub(crate) struct Error(&'static str);
 
+impl Error {
+    /// Read the stable code for caller-specific recovery.
+    pub(crate) fn code(&self) -> &'static str {
+        self.0
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
         out.write_str(self.0)

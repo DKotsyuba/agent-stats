@@ -22,6 +22,10 @@ Target version: 0.1.0.
 
 ### Added
 
+- Add the read-only MCP `model_stats` tool with rolling model comparisons, exact
+  model filtering and full structured aggregates. The MCP frontend checks the
+  service version and requests a reconnect on mismatch.
+
 - Ingest Codex OTLP logs with exact reported metrics and estimated durations for
   unambiguous WebSocket pairs. Add `speed_estimated` to stats and series metrics
   and `harness+model` to stats groupings.

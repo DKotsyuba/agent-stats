@@ -529,3 +529,63 @@ fn utc(millis: i64) -> String {
         rest % 1000
     )
 }
+
+/// Verify MCP filtering and structured output against an isolated real service.
+#[tokio::test]
+async fn model_stats_reads_service() {
+    use rmcp::{ServiceExt, model::CallToolRequestParams, transport::TokioChildProcess};
+
+    let service = Service::start();
+    assert_eq!(
+        service.post(TOKEN, "application/json", &fixture().to_string()),
+        200
+    );
+    assert_eq!(
+        service.cli(&["status"])["service_version"],
+        env!("CARGO_PKG_VERSION")
+    );
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-stats"));
+    command
+        .args(["mcp", "--socket"])
+        .arg(&service.socket)
+        .kill_on_drop(true);
+    tokio::time::timeout(Duration::from_secs(20), async {
+        let client =
+            ().serve(TokioChildProcess::new(command).expect("MCP transport"))
+                .await
+                .expect("initialize MCP");
+        for model in ["claude-haiku-5-5", "unknown-model"] {
+            let args = json!({"model": model, "group_by": "provider+model"});
+            let request = CallToolRequestParams::new("model_stats")
+                .with_arguments(args.as_object().expect("arguments").clone());
+            let reply = client.call_tool(request).await.expect("model_stats");
+            assert_eq!(reply.is_error, Some(false));
+            let text = &reply.content[0].as_text().expect("text response").text;
+            let body = reply.structured_content.expect("structured response");
+            assert_eq!(body["version"], 1);
+            assert_eq!(body["ok"], true);
+            let data = &body["data"];
+            assert_eq!(data["window"], "24h");
+            assert_eq!(data["group_by"], "provider+model");
+            let groups = data["groups"].as_array().expect("groups");
+            if model == "unknown-model" {
+                assert!(groups.is_empty());
+                assert_eq!(text, "No matching model calls.\n");
+            } else {
+                assert_eq!(groups.len(), 1);
+                assert_eq!(
+                    groups[0]["key"],
+                    json!({"model":model,"provider":"anthropic"})
+                );
+                assert_eq!(groups[0]["metrics"]["count"], 1);
+                assert_eq!(
+                    text,
+                    "claude-haiku-5-5 (anthropic): too few samples, 1 call\n"
+                );
+            }
+        }
+        client.cancel().await.expect("stop MCP");
+    })
+    .await
+    .expect("MCP deadline");
+}

@@ -3,6 +3,8 @@ use crate::response::Templates;
 use mcp_presentation::Renderer;
 use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::{Value, json};
+#[path = "model_stats.rs"]
+mod tool_model_stats;
 // xtask:modules
 
 pub fn definitions() -> Vec<Value> {
@@ -10,6 +12,7 @@ pub fn definitions() -> Vec<Value> {
         json!({"name":"get_status", "description":"Report the product identity and scaffold qualification status. Read-only; does not access files or external services.",
         "inputSchema":{"type":"object","properties":{},"additionalProperties":false},
         "annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}}),
+        tool_model_stats::definition(),
         // xtask:definitions
     ]
 }
@@ -19,12 +22,14 @@ pub fn templates() -> Vec<(&'static str, &'static str)> {
             "invalid_arguments",
             "ERROR invalid_arguments: get_status accepts an empty argument object.\n",
         ),
+        ("model_stats", tool_model_stats::TEMPLATE),
         // xtask:templates
     ]
 }
 pub fn incomplete() -> Vec<&'static str> {
     let statuses: &[(&str, bool)] = &[
         ("get_status", true),
+        ("model_stats", tool_model_stats::IMPLEMENTED),
         // xtask:readiness
     ];
     statuses
@@ -38,6 +43,7 @@ pub async fn call(
     args: Value,
     identity: &Renderer,
     _templates: &Templates,
+    socket: &std::path::Path,
 ) -> Option<CallToolResult> {
     match name {
         "get_status" => {
@@ -62,6 +68,7 @@ pub async fn call(
             result.is_error = Some(reply.is_error());
             Some(result)
         }
+        "model_stats" => Some(tool_model_stats::call(args, _templates, socket).await),
         // xtask:routes
         _ => None,
     }
