@@ -56,7 +56,10 @@ enum Commands {
         socket: PathBuf,
     },
     /// Run the protocol-only stdio endpoint.
-    Mcp,
+    Mcp {
+        #[arg(long, default_value = DEFAULT_MCP_SOCKET)]
+        socket: PathBuf,
+    },
     /// Check local resources, without credentials, network or mutation.
     Doctor {
         #[arg(long)]
@@ -102,9 +105,12 @@ struct Handler {
     identity: Arc<Renderer>,
     templates: Arc<response::Templates>,
     catalog: Vec<Tool>,
+    socket: PathBuf,
+    #[cfg(unix)]
+    freshness: Arc<tokio::sync::Mutex<Freshness>>,
 }
 impl Handler {
-    fn new() -> Result<Self, &'static str> {
+    fn new(socket: PathBuf) -> Result<Self, &'static str> {
         let identity = Renderer::new().map_err(|_| "presentation_setup_failed")?;
         let templates = response::Templates::new(&tools::templates())?;
         let catalog = serde_json::from_value(serde_json::Value::Array(tools::definitions()))
@@ -113,14 +119,99 @@ impl Handler {
             identity: Arc::new(identity),
             templates: Arc::new(templates),
             catalog,
+            socket,
+            #[cfg(unix)]
+            freshness: Arc::default(),
         })
     }
 }
+/// Default path for the private read socket.
+#[cfg(unix)]
+const DEFAULT_MCP_SOCKET: &str = stats::SOCKET;
+#[cfg(not(unix))]
+const DEFAULT_MCP_SOCKET: &str = "/run/agent-stats/read.sock";
+
+/// Per-session version probe and notification state.
+#[cfg(unix)]
+#[derive(Default)]
+struct Freshness {
+    checked: Option<std::time::Instant>,
+    stale: Option<String>,
+    notified: bool,
+}
+
+#[cfg(unix)]
+impl Handler {
+    /// Probe at most once every 30 seconds and retain any confirmed mismatch.
+    async fn check_version(&self) -> Option<String> {
+        let mut state = self.freshness.lock().await;
+        if state.stale.is_none()
+            && state
+                .checked
+                .is_none_or(|checked| checked.elapsed() >= std::time::Duration::from_secs(30))
+        {
+            state.checked = Some(std::time::Instant::now());
+            if let Ok(reply) = stats::call(&self.socket, stats::Operation::Status).await
+                && reply["ok"] == true
+                && let Some(version) = reply["data"]["service_version"].as_str()
+                && !version.is_empty()
+                && version.len() <= 64
+                && version
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+'))
+                && version != env!("CARGO_PKG_VERSION")
+            {
+                state.stale = Some(format!(
+                    "agent-stats service is {version}, this MCP frontend is {}: reconnect the agent-stats MCP server (Claude Code: /mcp → reconnect; Codex: restart the session)",
+                    env!("CARGO_PKG_VERSION")
+                ));
+            }
+        }
+        state.stale.clone()
+    }
+
+    /// Send the catalog invalidation once after the transport is initialized.
+    async fn notify_stale(&self, peer: &rmcp::Peer<RoleServer>) {
+        let mut state = self.freshness.lock().await;
+        if state.stale.is_some() && !state.notified && peer.notify_tool_list_changed().await.is_ok()
+        {
+            state.notified = true;
+        }
+    }
+}
+
 impl ServerHandler for Handler {
+    /// Check the local service before completing the legacy handshake.
+    #[cfg(unix)]
+    async fn initialize(
+        &self,
+        request: InitializeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<InitializeResult, McpError> {
+        self.check_version().await;
+        context.peer.set_peer_info(request.clone());
+        self.negotiate_initialize(&request)
+    }
+
+    /// Defer handshake-time invalidation until the client accepts notifications.
+    #[cfg(unix)]
+    async fn on_initialized(&self, context: rmcp::service::NotificationContext<RoleServer>) {
+        self.notify_stale(&context.peer).await;
+    }
     fn get_info(&self) -> ServerConfig {
-        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")))
-            .with_instructions("Use get_status for identity. Tool descriptions define effects. A not_implemented result never means work was performed.")
+        ServerConfig::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_tool_list_changed()
+                .build(),
+        )
+        .with_server_info(Implementation::new(
+            env!("CARGO_PKG_NAME"),
+            env!("CARGO_PKG_VERSION"),
+        ))
+        .with_instructions(
+            "Use model_stats to compare models and get_status for frontend identity.",
+        )
     }
     /// Return the static catalog; modern requests cache it privately for 60 seconds.
     /// Pagination is unused; legacy sessions retain their original wire fields.
@@ -143,12 +234,25 @@ impl ServerHandler for Handler {
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
+        #[cfg(unix)]
+        if let Some(message) = self.check_version().await {
+            self.notify_stale(&context.peer).await;
+            return Ok(CallToolResult::error(vec![ContentBlock::text(message)]).into());
+        }
+        #[cfg(not(unix))]
+        let _ = context;
         let args = serde_json::Value::Object(request.arguments.unwrap_or_default());
-        let reply = tools::call(&request.name, args, &self.identity, &self.templates)
-            .await
-            .ok_or_else(|| McpError::new(ErrorCode::METHOD_NOT_FOUND, "Unknown tool", None))?;
+        let reply = tools::call(
+            &request.name,
+            args,
+            &self.identity,
+            &self.templates,
+            &self.socket,
+        )
+        .await
+        .ok_or_else(|| McpError::new(ErrorCode::METHOD_NOT_FOUND, "Unknown tool", None))?;
         Ok(reply.into())
     }
 }
@@ -199,7 +303,17 @@ async fn main() -> ExitCode {
             socket,
             window,
             group_by,
-        } => stats_read(&socket, stats::Operation::ModelStats { window, group_by }).await,
+        } => {
+            stats_read(
+                &socket,
+                stats::Operation::ModelStats {
+                    window,
+                    group_by,
+                    model: None,
+                },
+            )
+            .await
+        }
         #[cfg(unix)]
         Commands::Series {
             socket,
@@ -245,7 +359,7 @@ async fn main() -> ExitCode {
             }
         },
         Commands::Doctor { json: _ } => {
-            let ready = Handler::new().is_ok();
+            let ready = Handler::new(DEFAULT_MCP_SOCKET.into()).is_ok();
             let output = print_json(
                 serde_json::json!({"product":env!("CARGO_PKG_NAME"),"version":env!("CARGO_PKG_VERSION"),
                 "local_ready":ready,"release_qualification":qualification(),"incomplete_tools":tools::incomplete()}),
@@ -254,7 +368,7 @@ async fn main() -> ExitCode {
         }
         Commands::Contract {
             command: ContractCommand::Export,
-        } => match Handler::new() {
+        } => match Handler::new(DEFAULT_MCP_SOCKET.into()) {
             Ok(h) => print_json(h.catalog),
             Err(e) => {
                 eprintln!("contract: {e}");
@@ -264,8 +378,8 @@ async fn main() -> ExitCode {
         Commands::Contract {
             command: ContractCommand::Readiness,
         } => print_json(tools::incomplete()),
-        Commands::Mcp => {
-            let h = match Handler::new() {
+        Commands::Mcp { socket } => {
+            let h = match Handler::new(socket) {
                 Ok(h) => h,
                 Err(e) => {
                     eprintln!("startup: {e}");

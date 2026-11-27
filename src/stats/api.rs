@@ -73,6 +73,8 @@ pub(crate) enum Operation {
     ModelStats {
         window: Window,
         group_by: Group,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
     },
     ModelSeries {
         model: String,
@@ -197,20 +199,17 @@ pub(super) fn read(
         )?;
         return Ok(
             json!({"last_sample_time_unix_ns": last_sample_time_unix_ns.map(|time| time.to_string()),
-            "counters": counters.snapshot()}),
+            "counters": counters.snapshot(), "service_version": env!("CARGO_PKG_VERSION")}),
         );
     }
 
     let (window, model, bucket) = match &operation {
-        Operation::ModelStats { window, .. } => (*window, None, None),
+        Operation::ModelStats { window, model, .. } => (*window, model.as_deref(), None),
         Operation::ModelSeries {
             model,
             bucket,
             window,
         } => {
-            if !super::normalize::label(model) {
-                return Err(Error("invalid_model"));
-            }
             let width = match bucket {
                 Bucket::Hour => HOUR_NS,
                 Bucket::Day => 24 * HOUR_NS,
@@ -220,6 +219,9 @@ pub(super) fn read(
         Operation::Status => return Err(Error("invalid_request")),
     };
 
+    if model.is_some_and(|model| !super::normalize::label(model)) {
+        return Err(Error("invalid_model"));
+    }
     let sql = if model.is_some() {
         "SELECT time_ns, model, provider, effort, output_tokens, duration_ms, ttft_ms,
                 harness, duration_source IS 'estimated'

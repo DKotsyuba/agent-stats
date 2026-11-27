@@ -18,7 +18,12 @@ agent-stats series --model claude-haiku-5-5 --bucket hour --window 24h
 The read commands default to `/run/agent-stats/read.sock` and accept `--socket`.
 See [installation and exporter setup](docs/install.md) and the [Hub socket
 contract](docs/architecture.md#hub-socket-protocol-v1). The bundled stdio
-MCP endpoint exposes the existing `get_status` identity tool.
+MCP endpoint runs as `agent-stats mcp` and reads the same private socket.
+
+| Tool | Effect | Purpose |
+|---|---|---|
+| [`model_stats`](docs/tools/model_stats.md) | Read | Compare rolling model speed, TTFT and call counts. |
+| `get_status` | Read | Report frontend identity and release qualification. |
 
 ## Enable Codex
 

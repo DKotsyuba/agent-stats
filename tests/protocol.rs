@@ -26,6 +26,7 @@ async fn protocol() {
         let mut command = tokio::process::Command::new(binary());
         command
             .arg("mcp")
+            .args(["--socket", "missing.sock"])
             .env_clear()
             .env("HOME", root.path())
             .current_dir(root.path())
@@ -67,9 +68,19 @@ async fn protocol() {
 /// Exchange raw JSON-RPC in an isolated child. Notifications receive no reply.
 /// A 20-second deadline covers reads and EOF shutdown; cancellation kills the child.
 async fn raw_exchange(requests: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    raw_exchange_at(requests, std::path::Path::new("missing.sock")).await
+}
+
+/// Collect notifications in wire order alongside request responses.
+async fn raw_exchange_at(
+    requests: &[serde_json::Value],
+    socket: &std::path::Path,
+) -> Vec<serde_json::Value> {
     let root = tempfile::tempdir().unwrap();
     let mut child = tokio::process::Command::new(binary())
         .arg("mcp")
+        .arg("--socket")
+        .arg(socket)
         .env_clear()
         .env("HOME", root.path())
         .current_dir(root.path())
@@ -89,16 +100,21 @@ async fn raw_exchange(requests: &[serde_json::Value]) -> Vec<serde_json::Value> 
                 .await
                 .unwrap();
             input.flush().await.unwrap();
-            if request.get("id").is_some() {
+            while request.get("id").is_some() {
                 let line = output
                     .next_line()
                     .await
                     .unwrap()
                     .expect("JSON-RPC response before EOF");
                 let reply: serde_json::Value = serde_json::from_str(&line).unwrap();
+                if reply.get("method").is_some() && reply.get("id").is_none() {
+                    replies.push(reply);
+                    continue;
+                }
                 assert_eq!(reply["id"], request["id"]);
                 assert!(reply.get("error").is_none(), "{reply}");
                 replies.push(reply);
+                break;
             }
         }
         drop(input);
@@ -107,6 +123,60 @@ async fn raw_exchange(requests: &[serde_json::Value]) -> Vec<serde_json::Value> 
     })
     .await
     .expect("raw protocol deadline")
+}
+
+/// Check the startup version probe, one invalidation, and repeatable recovery text.
+#[cfg(unix)]
+#[tokio::test]
+async fn model_stats_stale_frontend() {
+    use serde_json::json;
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().canonicalize().unwrap().join("read.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let requests = [
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "protocolVersion":"2025-11-25","capabilities":{},
+            "clientInfo":{"name":"raw-test","version":"1"}
+        }}),
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"model_stats"}}),
+        json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"model_stats"}}),
+    ];
+    let (replies, ()) = tokio::join!(raw_exchange_at(&requests, &socket), async {
+        let (mut stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(&mut stream)
+            .read_line(&mut line)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&line).unwrap()["op"],
+            "status"
+        );
+        stream
+            .write_all(b"{\"version\":1,\"ok\":true,\"data\":{\"service_version\":\"99.0.0\"}}\n")
+            .await
+            .unwrap();
+    });
+    assert_eq!(
+        replies[0]["result"]["capabilities"]["tools"]["listChanged"],
+        true
+    );
+    assert_eq!(replies[1]["method"], "notifications/tools/list_changed");
+    assert_eq!(replies.len(), 4);
+    for reply in &replies[2..] {
+        assert_eq!(reply["result"]["isError"], true);
+        assert_eq!(
+            reply["result"]["content"][0]["text"],
+            format!(
+                "agent-stats service is 99.0.0, this MCP frontend is {}: reconnect the agent-stats MCP server (Claude Code: /mcp → reconnect; Codex: restart the session)",
+                env!("CARGO_PKG_VERSION")
+            )
+        );
+    }
 }
 
 /// Build a modern request with its version and empty client capabilities.

@@ -68,11 +68,12 @@ Unauthorized peers are closed without a reply.
   `key` with `model` and the requested additional dimension, and a `metrics`
   object. Windows are `24h`, `7d`, `30d`. Groupings are `model`,
   `provider+model`, `model+effort` and `harness+model`. Missing effort is JSON null.
+  An optional `model` request field filters by exact identifier before aggregation.
 - `model_series` returns `window`, `model`, `bucket` and ascending `buckets`,
   each with `start_unix_ns` as a decimal string and `metrics`. Buckets are
   UTC-aligned `hour` or `day`, with empty buckets included. The window may
   cover part of the first or last bucket.
-- `status` returns `counters` and `last_sample_time_unix_ns` as a decimal
+- `status` returns `service_version`, `counters` and `last_sample_time_unix_ns` as a decimal
   string or null. Counters are process-local and distinguish rejection,
   dropped connections, invalid and ignored records, deduplication, commits,
   expiry and write failures.
@@ -94,4 +95,5 @@ request or 1024 groups fail with `query_too_large`, preserving exactness.
 The binary retains stdio MCP identity discovery and the template's immutable
 single-binary delivery commands. Service installation is described separately
 in [Install Agent Stats](install.md). CLI reads use the same socket protocol
-as the Hub. This version adds no MCP tools.
+as the Hub. The MCP frontend uses the same socket to serve
+[`model_stats`](tools/model_stats.md) and detect service version mismatches.
