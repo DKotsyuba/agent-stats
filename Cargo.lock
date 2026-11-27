@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agent-stats"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "family-delivery",
@@ -319,7 +319,7 @@ checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
 
 [[package]]
 name = "family-delivery"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fs2",
  "serde",
@@ -677,7 +677,7 @@ checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
 name = "mcp-presentation"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "minijinja",
  "serde",
@@ -1586,7 +1586,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "family-delivery",
