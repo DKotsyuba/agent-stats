@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 0.3.0
+
+### Added
+
+- `rate_result` (MCP tool, socket method and `agent-stats rate`) records an orchestrator's
+  rating of a delegated result: verdict, fix rounds, reason, tier, checks and a short note,
+  keyed by Run id. A later rating of the same id replaces the earlier one. Writes are limited
+  to the reader allowlist or the new explicit `rating_uids` setting; the ingest token is not
+  involved. Ratings live in a new additive SQLite table and expire 90 days after their last change.
+- `ratings` (MCP tool, socket method and `agent-stats ratings`) lists recent ratings, newest
+  change first, in bounded cursor pages.
+- `model_stats` reports acceptance per group: `rated`, `accepted`, `accepted_first_time`, rates,
+  `mean_rounds` and top reasons, and its text appends `· accepted 18/22 (first try 14)`.
+  The MCP tool also accepts `group_by` `model+effort`. Status counters add `ratings_recorded`
+  and `denied_ratings`.
+
 ## 0.2.1
 
 ### Fixed

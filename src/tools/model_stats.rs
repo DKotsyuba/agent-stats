@@ -11,11 +11,11 @@ pub const TEMPLATE: &str = include_str!("../../assets/mcp/tools/model_stats.txt.
 
 /// Discovery contract for model selection and exact model filtering.
 pub fn definition() -> Value {
-    json!({"name":"model_stats", "description":"Compare model speed, time to first token, and call volume over a rolling window.",
+    json!({"name":"model_stats", "description":"Compare model speed, time to first token, call volume and orchestrator acceptance ratings (see rate_result) over a rolling window.",
         "inputSchema":{"type":"object","properties":{
             "window":{"enum":["24h","7d","30d"],"type":"string","default":"24h"},
             "model":{"type":"string","description":"Exact model identifier"},
-            "group_by":{"enum":["model","provider+model","harness+model"],"type":"string","default":"model"}
+            "group_by":{"enum":["model","provider+model","harness+model","model+effort"],"type":"string","default":"model"}
         },"additionalProperties":false},
         "annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}})
 }
@@ -50,6 +50,8 @@ mod unix {
         Provider,
         #[serde(rename = "harness+model")]
         Harness,
+        #[serde(rename = "model+effort")]
+        Effort,
     }
 
     /// Validated parameters for one aggregate read.
@@ -79,6 +81,15 @@ mod unix {
     struct Row {
         key: Key,
         metrics: Metrics,
+        ratings: Option<Ratings>,
+    }
+
+    /// Orchestrator acceptance counts; absent for groups with no ratings.
+    #[derive(Deserialize)]
+    struct Ratings {
+        rated: u64,
+        accepted: u64,
+        accepted_first_time: u64,
     }
 
     /// Identity and optional grouping dimension.
@@ -87,6 +98,16 @@ mod unix {
         model: String,
         provider: Option<String>,
         harness: Option<String>,
+        /// Outer `Some` marks a `model+effort` group; the inner value is null without effort.
+        #[serde(default, deserialize_with = "present")]
+        effort: Option<Option<String>>,
+    }
+
+    /// Distinguish an explicit null effort from an absent field.
+    fn present<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Option<String>>, D::Error> {
+        Option::<String>::deserialize(deserializer).map(Some)
     }
 
     /// Call count and independent speed and TTFT distributions.
@@ -116,6 +137,7 @@ mod unix {
         range: Option<String>,
         estimated: bool,
         ttft: Option<String>,
+        rating: Option<String>,
     }
 
     /// Rows supplied to the closed text template.
@@ -139,7 +161,19 @@ mod unix {
                 let speed = row.metrics.speed_tokens_per_second;
                 Line {
                     model: row.key.model,
-                    dimension: row.key.provider.or(row.key.harness),
+                    dimension: row.key.provider.or(row.key.harness).or(row
+                        .key
+                        .effort
+                        .map(|effort| effort.unwrap_or_else(|| "no effort".into()))),
+                    rating: row
+                        .ratings
+                        .filter(|ratings| ratings.rated > 0)
+                        .map(|ratings| {
+                            format!(
+                                "accepted {}/{} (first try {})",
+                                ratings.accepted, ratings.rated, ratings.accepted_first_time
+                            )
+                        }),
                     count: row.metrics.count,
                     speed: speed.median.map(|value| format!("{value:.0}")),
                     range: speed
@@ -162,13 +196,14 @@ mod unix {
     pub(super) async fn call(args: Value, templates: &Templates, socket: &Path) -> CallToolResult {
         let Ok(args) = serde_json::from_value::<Arguments>(args) else {
             return error(
-                "ERROR invalid_arguments: use window 24h, 7d or 30d; group_by model, provider+model or harness+model; and an optional exact model.",
+                "ERROR invalid_arguments: use window 24h, 7d or 30d; group_by model, provider+model, harness+model or model+effort; and an optional exact model.",
             );
         };
         let group_by = match args.group_by {
             GroupBy::Model => Group::Model,
             GroupBy::Provider => Group::ProviderModel,
             GroupBy::Harness => Group::HarnessModel,
+            GroupBy::Effort => Group::ModelEffort,
         };
         let reply = match stats::call(
             socket,
@@ -245,16 +280,47 @@ mod unix {
                         "ttft_ms": {"median": ttft}}
                 })
             };
-            let data = serde_json::from_value(json!({"groups": [
+            let mut groups = json!([
                 row("gpt-6", "openai", 20, 120, 90, 150, 1100, true),
                 row("small", "anthropic", 4, 60, 30, 80, 500, false),
-                row("claude-sonnet-5-5", "anthropic", 412, 170, 120, 230, 900, false),
-            ]}))
-            .unwrap();
+                row(
+                    "claude-sonnet-5-5",
+                    "anthropic",
+                    412,
+                    170,
+                    120,
+                    230,
+                    900,
+                    false
+                ),
+            ]);
+            groups[2]["ratings"] = json!({"rated": 22, "accepted": 18, "accepted_first_time": 14});
+            groups[1]["ratings"] = json!({"rated": 1, "accepted": 0, "accepted_first_time": 0});
+            let data = serde_json::from_value(json!({ "groups": groups })).unwrap();
             let templates = Templates::new(&[("model_stats", TEMPLATE)]).unwrap();
             assert_eq!(
                 render(&templates, data).unwrap(),
                 include_str!("../../tests/fixtures/model_stats.txt")
+            );
+        }
+
+        /// `model+effort` groups label the effort, with a distinct label when none was set.
+        #[test]
+        fn model_effort_dimension() {
+            let group = |effort: Value| {
+                json!({"key": {"model": "m", "effort": effort},
+                    "metrics": {"count": 7, "speed_estimated": false,
+                        "speed_tokens_per_second": {"median": null, "p10": null, "p90": null},
+                        "ttft_ms": {"median": null}}})
+            };
+            let data = serde_json::from_value(
+                json!({"groups": [group(json!("high")), group(Value::Null)]}),
+            )
+            .unwrap();
+            let templates = Templates::new(&[("model_stats", TEMPLATE)]).unwrap();
+            assert_eq!(
+                render(&templates, data).unwrap(),
+                "m (high): speed unavailable, TTFT unavailable, 7 calls\nm (no effort): speed unavailable, TTFT unavailable, 7 calls\n"
             );
         }
 

@@ -8,7 +8,9 @@ dedicated system user `agent-stats` and group `agent-stats-read` first.
 For a Hub running under a different UID, give its process the supplemental
 `agent-stats-read` group and add its numeric UID to `allowed_uids` in
 [`examples/agent-stats.toml`](../examples/agent-stats.toml). The service UID
-can always read. The systemd unit creates the private state and socket directories.
+can always read. Ratings follow the same list unless `rating_uids` is set; it
+then names exactly the UIDs that may write ratings (include the service UID if it
+should). The systemd unit creates the private state and socket directories.
 
 Create `/etc/agent-stats` as a root-owned directory with group
 `agent-stats-read` and mode 0750. Install the example there as

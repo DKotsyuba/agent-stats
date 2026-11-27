@@ -1,0 +1,1 @@
+OK rate_result: {{ agent_id }} {{ verdict }} ({{ model }}{% if tier %}, tier {{ tier }}{% endif %}, rounds {{ rounds }}{% if reason %}, reason {{ reason }}{% endif %}). {% if replaced %}Replaced the earlier rating.{% else %}Recorded.{% endif %}{{ "\n" -}}

@@ -1,0 +1,3 @@
+run_2: rejected · claude-sonnet-5-5 (anthropic, high) · tier C · rounds 2 · wrong_solution · checks 5 passed/1 failed/0 not run · 2026-11-18 11:06Z · "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx…"
+run_1: accepted · gpt-6 · rounds 0 · 2026-11-18 08:20Z
+More: call ratings again with cursor "1794990000000000000:run_1".

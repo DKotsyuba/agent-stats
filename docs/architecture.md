@@ -60,6 +60,8 @@ Unauthorized peers are closed without a reply.
 {"version":1,"op":"status"}
 ```
 
+Result ratings add `rate_result` and `ratings` (see [Result ratings](#result-ratings)).
+
 - Success envelope `{"version":1,"ok":true,"data":{...}}`.
 - Error envelope `{"version":1,"ok":false,"error":"query_too_large"}`.
   Bad frames or arguments, unsupported versions, reader saturation, timeout
@@ -92,10 +94,51 @@ speed sample uses an estimated duration. TTFT is independent of speed.
 Reads exceeding 100,000 eligible rows for the
 request or 1024 groups fail with `query_too_large`, preserving exactness.
 
+## Result ratings
+
+Orchestrators record how a delegated result turned out. A rating is keyed by
+the delegated Run id and holds `model`, optional `provider`, `effort` and
+`tier` (`S` to `F`), a `verdict` (`accepted`, `accepted_after_fixes` or
+`rejected`), `rounds` (fix rounds), an optional `reason`, optional `checks`
+counts and a note of at most 200 characters. The `ratings` table is created
+additively next to `samples` and is written only through the single writer.
+A later rating of the same Run id replaces the earlier row, keeps its
+first-rated time and sets the last change time. Expiry deletes ratings whose
+last change is older than 90 days (inclusive boundary, 512 per pass), separately
+from the 30-day sample window.
+
+`rate_result` is the only write on the socket. It is refused with `not_permitted`
+unless the peer UID may rate: the service user and `allowed_uids`, or exactly the
+UIDs in `rating_uids` when that list is configured (the service user is then not
+implicit). A UID listed only in `rating_uids` can rate but not read. The ingest
+token is not involved. The request is validated before it is queued; the reply
+reports `replaced` after the commit. A full writer queue returns `busy` with no
+effect.
+
+```json
+{"version":1,"op":"rate_result","agent_id":"run-1","model":"claude-sonnet-5-5","verdict":"accepted_after_fixes","rounds":2,"reason":"incomplete","tier":"C"}
+{"version":1,"op":"ratings","model":"claude-sonnet-5-5","limit":20,"cursor":"1794990000000000000:run-1"}
+```
+
+`ratings` returns up to 100 rows (default 20), newest change first, and a
+`next_cursor` of `<updated_unix_ns>:<agent_id>` or null.
+
+`model_stats` adds a `ratings` object to groups that have ratings changed inside
+the window, including groups with no observed calls (`count` 0). `model`,
+`provider+model` and `model+effort` groupings are supported; ratings have no
+harness, so `harness+model` groups report none. A rating without a provider
+groups as `unknown` under `provider+model`. The object has `rated`, `accepted`
+(including after fixes), `accepted_first_time` (verdict `accepted`), `rejected`,
+`accepted_rate`, `accepted_first_time_rate`, `mean_rounds` over all rated results
+and `top_reasons`, up to three `{reason, count}` entries over results that were
+not accepted first time, ordered by count then name. Groups without ratings omit
+the object. Status counters add `ratings_recorded` and `denied_ratings`.
+
 ## Template delivery
 
 The binary retains stdio MCP identity discovery and the template's immutable
 single-binary delivery commands. Service installation is described separately
 in [Install Agent Stats](install.md). CLI reads use the same socket protocol
 as the Hub. The MCP frontend uses the same socket to serve
-[`model_stats`](tools/model_stats.md) and detect service version mismatches.
+[`model_stats`](tools/model_stats.md), [`rate_result`](tools/rate_result.md) and
+[`ratings`](tools/ratings.md) and detect service version mismatches.

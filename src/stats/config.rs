@@ -20,6 +20,8 @@ pub(super) struct Config {
     pub state_dir: PathBuf,
     pub socket: PathBuf,
     pub allowed_uids: Vec<u32>,
+    /// Exact UIDs that may write result ratings. When absent, anyone who may read may rate.
+    pub rating_uids: Option<Vec<u32>>,
     pub token_file: PathBuf,
     pub digest_key_file: PathBuf,
     pub provider_labels: BTreeMap<String, String>,
@@ -39,6 +41,7 @@ impl Default for Config {
             state_dir: "/var/lib/agent-stats".into(),
             socket: SOCKET.into(),
             allowed_uids: Vec::new(),
+            rating_uids: None,
             token_file: "/etc/agent-stats/ingest.token".into(),
             digest_key_file: "/etc/agent-stats/digest.key".into(),
             provider_labels: BTreeMap::new(),

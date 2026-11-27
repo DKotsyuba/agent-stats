@@ -6,6 +6,9 @@ digest_key_file = "/etc/agent-stats/digest.key"
 
 # The service UID is implicit. Add the Hub's numeric UID here and grant it socket group access.
 allowed_uids = []
+# Optional. When set, exactly these UIDs may write result ratings (the service UID is not implicit);
+# when absent, anyone who may read may also rate.
+# rating_uids = []
 
 max_body_bytes = 524288
 max_records = 512
