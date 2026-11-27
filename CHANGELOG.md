@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.2.1
+
+### Fixed
+
+- Speed uses only answers of at least 100 output tokens whose generation takes at least a fifth
+  of the request; one-burst bodies (unstreamed thinking, buffering gateways) and short answers
+  dominated by the end-of-stream tail produced impossible minima and maxima.
+
 ## 0.2.0
 
 Target version: 0.1.0.
