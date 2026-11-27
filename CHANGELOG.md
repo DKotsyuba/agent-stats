@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.0
+
 Target version: 0.1.0.
 
 ### Changed
