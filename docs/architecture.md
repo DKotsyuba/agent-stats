@@ -84,7 +84,9 @@ has its own eligible `count`, plus `mean`, `median`, `min`, `max`, `p10`
 and `p90` (all null when that distribution is empty). Percentiles use exact
 raw samples with linear interpolation at rank `(n−1)p`. Speed is a
 client-observed estimate of `output_tokens × 1000 / (duration_ms − ttft_ms)`
-when output is at least 20 tokens and duration minus TTFT is at least 50 ms.
+when output is at least 100 tokens, duration minus TTFT is at least 50 ms and at least a fifth of the
+duration (shorter answers are dominated by the end-of-stream tail; a smaller share means the body arrived
+as one burst, e.g. after unstreamed thinking or a buffering gateway).
 The metrics object includes `speed_estimated`, true when any contributing
 speed sample uses an estimated duration. TTFT is independent of speed.
 Reads exceeding 100,000 eligible rows for the
