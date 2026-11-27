@@ -4,8 +4,11 @@
 implementing mutations: authorized roots/tenants, subjects, side effects and a
 real reporting channel. -->
 
-The product exposes one read-only identity tool. It performs no filesystem
-mutation, external SaaS access, daemon, or credential handling. Describe the
+The product exposes read-only tools plus one write, `rate_result`, which stores
+an orchestrator's rating in the service's private SQLite database through the
+peer-UID-authorized Unix socket. Only `allowed_uids` (and the service user), or
+exactly `rating_uids` when configured, may write; the ingest token is not
+involved. It performs no other mutation, external SaaS access or credential handling. Describe the
 actual authorized roots, subjects and side effects before implementing
 mutations. Tool annotations and caller-supplied actor labels are not
 authentication.

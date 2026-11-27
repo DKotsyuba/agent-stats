@@ -3,6 +3,8 @@
 Agent Stats records per-model Claude Code and Codex performance via authenticated
 loopback OTLP/HTTP. It keeps 30 days of raw samples in private SQLite and serves
 speed and time-to-first-token aggregates over a peer-UID-authorized Unix socket.
+Orchestrators can also rate delegated results; ratings are kept 90 days and
+`model_stats` reports acceptance rates beside speed.
 Speed aggregates that include estimated Codex durations carry the
 `speed_estimated` flag.
 
@@ -13,6 +15,8 @@ agent-stats serve --config /etc/agent-stats/agent-stats.toml
 agent-stats status
 agent-stats stats --window 7d --group-by provider+model
 agent-stats series --model claude-haiku-5-5 --bucket hour --window 24h
+agent-stats rate --agent-id RUN_ID --model claude-sonnet-5-5 --tier C --verdict accepted
+agent-stats ratings --model claude-sonnet-5-5 --limit 20
 ```
 
 The read commands default to `/run/agent-stats/read.sock` and accept `--socket`.
@@ -22,7 +26,9 @@ MCP endpoint runs as `agent-stats mcp` and reads the same private socket.
 
 | Tool | Effect | Purpose |
 |---|---|---|
-| [`model_stats`](docs/tools/model_stats.md) | Read | Compare rolling model speed, TTFT and call counts. |
+| [`model_stats`](docs/tools/model_stats.md) | Read | Compare rolling model speed, TTFT, call counts and acceptance ratings. |
+| [`rate_result`](docs/tools/rate_result.md) | Write | Rate a delegated result; a later rating of the same Run id replaces the earlier one. |
+| [`ratings`](docs/tools/ratings.md) | Read | List recent ratings, newest first, one bounded page at a time. |
 | `get_status` | Read | Report frontend identity and release qualification. |
 
 ## Enable Codex
@@ -87,7 +93,7 @@ cargo xtask package verify dist/agent-stats-0.1.0-aarch64-apple-darwin
 The bundle executable accepts `self-install --bundle PATH --home ABS_PATH --bin-dir ABS_PATH`.
 Create the bin directory explicitly. Installation preserves immutable versions, never restarts
 services and does not edit MCP host configuration. `releases use VERSION` verifies and selects
-a retained compatible version. Binary rollback preserves the service database and credentials. The installer preserves user data. The service expires raw samples after 30 days.
+a retained compatible version. Binary rollback preserves the service database and credentials. The installer preserves user data. The service expires raw samples after 30 days and ratings after 90 days.
 
 CI restores Cargo dependency builds and a versioned cargo-deny tool cache. Successful
 main check jobs warm the check cache; an independent main-only package job warms

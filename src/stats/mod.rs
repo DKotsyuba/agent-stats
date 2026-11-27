@@ -7,7 +7,7 @@ mod normalize;
 mod socket;
 mod store;
 
-pub(crate) use api::{Bucket, Group, Operation, Window};
+pub(crate) use api::{Bucket, Checks, Group, Operation, Rating, Reason, Tier, Verdict, Window};
 use config::Config;
 use ring::{digest, hmac};
 use serde_json::{Value, json};
@@ -30,6 +30,8 @@ use tokio::{
 pub(crate) const SOCKET: &str = config::SOCKET;
 const HOUR_NS: i64 = 3_600_000_000_000;
 const RETENTION_NS: i64 = 30 * 24 * HOUR_NS;
+/// Ratings outlive raw samples so a model comparison keeps its acceptance history.
+const RATING_RETENTION_NS: i64 = 90 * 24 * HOUR_NS;
 const MAX_SOCKET_CONNECTIONS: usize = 16;
 const HTTP_CONNECTION_HEADROOM: usize = 16;
 
@@ -86,6 +88,8 @@ struct Counters {
     write_failed_records: Count,
     disk_full: Count,
     retention_failed: Count,
+    ratings_recorded: Count,
+    ratings_denied: Count,
 }
 
 impl Counters {
@@ -101,6 +105,7 @@ impl Counters {
             "dropped_connections": self.connection_dropped.get(), "failed_write_batches": self.write_failed.get(),
             "failed_write_records": self.write_failed_records.get(), "disk_full_batches": self.disk_full.get(),
             "failed_retention_batches": self.retention_failed.get(),
+            "ratings_recorded": self.ratings_recorded.get(), "denied_ratings": self.ratings_denied.get(),
         })
     }
 }
@@ -108,6 +113,8 @@ impl Counters {
 /// Writer messages carry projected rows and a commit receipt, or one bounded expiry pass.
 enum Write {
     Batch(normalize::Batch, oneshot::Sender<Result<(), Error>>),
+    /// One rating and the time it is recorded at; the reply says whether an earlier rating was replaced.
+    Rating(Box<Rating>, i64, oneshot::Sender<Result<bool, Error>>),
     Expire,
 }
 
@@ -150,6 +157,13 @@ fn writer(mut conn: rusqlite::Connection, mut queue: mpsc::Receiver<Write>, coun
                     if error.0 == "disk_full" {
                         counters.disk_full.add(1);
                     }
+                }
+                let _ = reply.send(result);
+            }
+            Write::Rating(rating, now, reply) => {
+                let result = store::rate(&mut conn, &rating, now);
+                if result.is_ok() {
+                    counters.ratings_recorded.add(1);
                 }
                 let _ = reply.send(result);
             }
@@ -220,7 +234,11 @@ pub(crate) async fn serve(path: &Path) -> Result<(), Error> {
             }
             accepted = read_listener.accept() => {
                 let Ok((stream, _)) = accepted else { break Err(Error("socket_accept_failed")) };
-                if !socket::authorized(&stream, &state.config.allowed_uids) {
+                if !socket::authorized(
+                    &stream,
+                    &state.config.allowed_uids,
+                    state.config.rating_uids.as_deref(),
+                ) {
                     state.counters.socket_denied.add(1);
                 } else if socket_tasks.len() >= MAX_SOCKET_CONNECTIONS {
                     state.counters.connection_dropped.add(1);

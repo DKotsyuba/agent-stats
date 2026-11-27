@@ -1,0 +1,8 @@
+{% for row in rows %}
+{{ row.agent_id }}: {{ row.verdict }} · {{ row.model }}{% if row.context %} ({{ row.context }}){% endif %}{% if row.tier %} · tier {{ row.tier }}{% endif %} · rounds {{ row.rounds }}{% if row.reason %} · {{ row.reason }}{% endif %}{% if row.checks %} · checks {{ row.checks }}{% endif %} · {{ row.when }}{% if row.note %} · "{{ row.note }}"{% endif %}{{ "\n" -}}
+{% else %}
+No ratings recorded.
+{% endfor %}
+{% if next %}
+More: call ratings again with cursor "{{ next }}".
+{% endif %}

@@ -2,12 +2,21 @@
 
 Read model performance over the last `24h` (default), `7d` or `30d`.
 Supply `model` for an exact model identifier. Set `group_by` to `model`
-(default), `provider+model` or `harness+model`.
+(default), `provider+model`, `harness+model` or `model+effort`.
 
 Text lists groups from highest median output speed to lowest. Speed is in
 tokens per second and time to first token (TTFT) is in seconds. Groups
 with fewer than five calls show their count and a “too few samples” label.
-A tilde and `(est.)` mark speeds that include estimated durations. The
+A tilde and `(est.)` mark speeds that include estimated durations.
+Groups with ratings from [`rate_result`](rate_result.md) end with
+`· accepted 18/22 (first try 14)`: accepted (including after fixes) over rated
+results, and how many were accepted with no fixes. Ratings count when their last
+change falls inside the window. `harness+model` groups carry no ratings, and a
+rated model with no observed calls shows `0 calls`. Groups without ratings omit
+the suffix. The structured `ratings` object adds `rated`, `accepted`,
+`accepted_first_time`, `rejected`, `accepted_rate`, `accepted_first_time_rate`,
+`mean_rounds` and up to three `top_reasons` over results that were not accepted
+first time. The
 complete versioned socket response in `structuredContent` includes sample
 counts and unrounded distributions. When the text exceeds the presentation
 budget, the tool still returns the complete structured result.

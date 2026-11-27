@@ -47,6 +47,11 @@ impl Service {
 
     /// Admit a capture with custom body and record limits.
     fn start_with_limits(max_body_bytes: usize, max_records: usize) -> Self {
+        Self::start_with(max_body_bytes, max_records, "")
+    }
+
+    /// Start with extra top-level TOML settings, such as `rating_uids`.
+    fn start_with(max_body_bytes: usize, max_records: usize, extra: &str) -> Self {
         let home = tempfile::Builder::new()
             .prefix("st-")
             .permissions(fs::Permissions::from_mode(0o700))
@@ -67,7 +72,7 @@ impl Service {
         fs::write(
             &config,
             format!(
-                "listen = '127.0.0.1:{port}'\nstate_dir = {:?}\nsocket = {:?}\ntoken_file = {:?}\ndigest_key_file = {:?}\nmax_body_bytes = {max_body_bytes}\nmax_records = {max_records}\nmax_requests = 1\n",
+                "listen = '127.0.0.1:{port}'\nstate_dir = {:?}\nsocket = {:?}\ntoken_file = {:?}\ndigest_key_file = {:?}\nmax_body_bytes = {max_body_bytes}\nmax_records = {max_records}\nmax_requests = 1\n{extra}\n",
                 home.path().join("db"), socket, token, key,
             ),
         )
@@ -103,6 +108,18 @@ impl Service {
             .expect("HTTP timeout");
         write!(client, "POST /v1/logs HTTP/1.1\r\nHost: localhost\r\nx-stats-token: {token}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\r\n{body}", body.len()).expect("send HTTP");
         http_status(&mut client)
+    }
+
+    /// Send one raw request line and return the parsed reply envelope.
+    fn raw(&self, request: &Value) -> Value {
+        let mut stream = UnixStream::connect(&self.socket).expect("socket");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(4)))
+            .expect("socket timeout");
+        writeln!(stream, "{request}").expect("write socket");
+        let mut response = String::new();
+        stream.read_to_string(&mut response).expect("read socket");
+        serde_json::from_str(&response).expect("socket JSON")
     }
 
     /// Exercise the same Unix socket CLI entry point the user runs.
@@ -590,6 +607,259 @@ async fn model_stats_reads_service() {
                 );
             }
         }
+        client.cancel().await.expect("stop MCP");
+    })
+    .await
+    .expect("MCP deadline");
+}
+
+/// Write, replace and read ratings through the CLI; validation and counters go through the socket.
+#[test]
+fn ratings_write_replace_and_aggregate() {
+    let service = Service::start();
+    let first = service.cli(&[
+        "rate",
+        "--agent-id",
+        "run-1",
+        "--model",
+        "claude-sonnet-5-5",
+        "--provider",
+        "anthropic",
+        "--effort",
+        "high",
+        "--tier",
+        "C",
+        "--verdict",
+        "rejected",
+        "--rounds",
+        "2",
+        "--reason",
+        "wrong_solution",
+    ]);
+    assert_eq!(first["replaced"], false);
+    assert_eq!(first["verdict"], "rejected");
+    assert_eq!(first["rounds"], 2);
+    service.cli(&[
+        "rate",
+        "--agent-id",
+        "run-2",
+        "--model",
+        "claude-sonnet-5-5",
+        "--provider",
+        "anthropic",
+        "--effort",
+        "high",
+        "--verdict",
+        "accepted",
+    ]);
+    let replaced = service.cli(&[
+        "rate",
+        "--agent-id",
+        "run-1",
+        "--model",
+        "claude-sonnet-5-5",
+        "--provider",
+        "anthropic",
+        "--effort",
+        "high",
+        "--tier",
+        "C",
+        "--verdict",
+        "accepted_after_fixes",
+        "--rounds",
+        "3",
+        "--checks-passed",
+        "5",
+        "--checks-failed",
+        "1",
+        "--note",
+        "tests fixed",
+    ]);
+    assert_eq!(replaced["replaced"], true);
+    assert_eq!(replaced["rounds"], 3);
+
+    let page = service.cli(&["ratings"]);
+    let rows = page["ratings"].as_array().expect("ratings");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows[0]["agent_id"], "run-1",
+        "the replaced rating is the newest change"
+    );
+    assert_eq!(rows[0]["verdict"], "accepted_after_fixes");
+    assert_eq!(rows[0]["reason"], Value::Null);
+    assert_eq!(
+        rows[0]["checks"],
+        json!({"passed": 5, "failed": 1, "not_run": 0})
+    );
+    assert_eq!(rows[0]["note"], "tests fixed");
+    assert_eq!(rows[1]["agent_id"], "run-2");
+    let limited = service.cli(&["ratings", "--limit", "1"]);
+    assert_eq!(limited["ratings"].as_array().expect("ratings").len(), 1);
+    assert!(limited["next_cursor"].is_string());
+
+    let stats = service.cli(&["stats", "--group-by", "model+effort"]);
+    let group = &stats["groups"][0];
+    assert_eq!(
+        group["key"],
+        json!({"model": "claude-sonnet-5-5", "effort": "high"})
+    );
+    assert_eq!(group["metrics"]["count"], 0);
+    assert_eq!(group["ratings"]["rated"], 2);
+    assert_eq!(group["ratings"]["accepted"], 2);
+    assert_eq!(group["ratings"]["accepted_first_time"], 1);
+    assert_eq!(group["ratings"]["mean_rounds"], 1.5);
+
+    let bad = service.raw(
+        &json!({"version": 1, "op": "rate_result", "agent_id": "run-3",
+        "model": "m", "verdict": "accepted", "rounds": 1}),
+    );
+    assert_eq!(
+        bad,
+        json!({"version": 1, "ok": false, "error": "invalid_rounds"})
+    );
+    let unknown = service.raw(
+        &json!({"version": 1, "op": "rate_result", "agent_id": "run-3",
+        "model": "m", "verdict": "accepted", "surprise": true}),
+    );
+    assert_eq!(unknown["error"], "invalid_request");
+    assert_eq!(service.cli(&["status"])["counters"]["ratings_recorded"], 3);
+    assert_eq!(
+        service.cli(&["ratings"])["ratings"]
+            .as_array()
+            .expect("ratings")
+            .len(),
+        2
+    );
+}
+
+/// An explicit `rating_uids` list excludes even the service user; reads remain allowed.
+#[test]
+fn rating_refused_for_unlisted_uid() {
+    let other = rustix::process::geteuid().as_raw() ^ 1;
+    let service = Service::start_with(4096, 2, &format!("rating_uids = [{other}]"));
+    let denied = service.raw(
+        &json!({"version": 1, "op": "rate_result", "agent_id": "run-1",
+        "model": "m", "verdict": "accepted"}),
+    );
+    assert_eq!(
+        denied,
+        json!({"version": 1, "ok": false, "error": "not_permitted"})
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_agent-stats"))
+        .args([
+            "rate",
+            "--agent-id",
+            "run-1",
+            "--model",
+            "m",
+            "--verdict",
+            "accepted",
+            "--socket",
+        ])
+        .arg(&service.socket)
+        .output()
+        .expect("rate CLI");
+    assert!(!output.status.success());
+    let status = service.cli(&["status"]);
+    assert_eq!(status["counters"]["denied_ratings"], 2);
+    assert_eq!(status["counters"]["ratings_recorded"], 0);
+    assert!(
+        service.cli(&["ratings"])["ratings"]
+            .as_array()
+            .expect("ratings")
+            .is_empty()
+    );
+}
+
+/// MCP tools write, list and aggregate ratings with the documented texts.
+#[tokio::test]
+async fn rating_tools_through_mcp() {
+    use rmcp::{ServiceExt, model::CallToolRequestParams, transport::TokioChildProcess};
+
+    let service = Service::start();
+    assert_eq!(
+        service.post(TOKEN, "application/json", &fixture().to_string()),
+        200
+    );
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-stats"));
+    command
+        .args(["mcp", "--socket"])
+        .arg(&service.socket)
+        .kill_on_drop(true);
+    tokio::time::timeout(Duration::from_secs(20), async {
+        let client =
+            ().serve(TokioChildProcess::new(command).expect("MCP transport"))
+                .await
+                .expect("initialize MCP");
+        let call = |name: &'static str, args: Value| {
+            let client = &client;
+            async move {
+                let request = CallToolRequestParams::new(name)
+                    .with_arguments(args.as_object().expect("arguments").clone());
+                let reply = client.call_tool(request).await.expect(name);
+                let text = reply.content[0].as_text().expect("text response").text.clone();
+                (reply.is_error, text, reply.structured_content)
+            }
+        };
+        let model = "claude-haiku-5-5";
+        let (error, text, structured) = call(
+            "rate_result",
+            json!({"agent_id": "run-1", "model": model, "provider": "anthropic", "tier": "D",
+                "verdict": "rejected", "rounds": 1, "reason": "incomplete"}),
+        )
+        .await;
+        assert_eq!(error, Some(false));
+        assert_eq!(
+            text,
+            "OK rate_result: run-1 rejected (claude-haiku-5-5, tier D, rounds 1, reason incomplete). Recorded.\n"
+        );
+        assert_eq!(structured.expect("structured")["data"]["replaced"], false);
+        let (error, text, _) = call(
+            "rate_result",
+            json!({"agent_id": "run-1", "model": model, "provider": "anthropic", "tier": "D",
+                "verdict": "accepted_after_fixes", "rounds": 2, "reason": "incomplete"}),
+        )
+        .await;
+        assert_eq!(error, Some(false));
+        assert_eq!(
+            text,
+            "OK rate_result: run-1 accepted_after_fixes (claude-haiku-5-5, tier D, rounds 2, reason incomplete). Replaced the earlier rating.\n"
+        );
+        let (error, _, _) = call(
+            "rate_result",
+            json!({"agent_id": "run-2", "model": model, "provider": "anthropic", "verdict": "accepted"}),
+        )
+        .await;
+        assert_eq!(error, Some(false));
+        let (error, text, _) =
+            call("rate_result", json!({"agent_id": "run-3", "model": model, "verdict": "accepted", "rounds": 4})).await;
+        assert_eq!(error, Some(true));
+        assert!(text.starts_with("ERROR invalid_rounds"), "{text}");
+
+        let (error, text, structured) = call("ratings", json!({"model": model, "limit": 1})).await;
+        assert_eq!(error, Some(false));
+        let lines: Vec<_> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "{text}");
+        assert!(lines[0].starts_with("run-2: accepted · claude-haiku-5-5 (anthropic) · rounds 0 · 20"), "{text}");
+        assert!(lines[1].starts_with("More: call ratings again with cursor \""), "{text}");
+        let cursor = structured.expect("structured")["data"]["next_cursor"]
+            .as_str()
+            .expect("cursor")
+            .to_owned();
+        let (_, text, _) = call("ratings", json!({"model": model, "cursor": cursor})).await;
+        assert!(
+            text.starts_with("run-1: accepted_after_fixes · claude-haiku-5-5 (anthropic) · tier D · rounds 2 · incomplete · 20"),
+            "{text}"
+        );
+        assert_eq!(text.lines().count(), 1, "{text}");
+
+        let (error, text, _) =
+            call("model_stats", json!({"model": model, "group_by": "provider+model"})).await;
+        assert_eq!(error, Some(false));
+        assert_eq!(
+            text,
+            "claude-haiku-5-5 (anthropic): too few samples, 1 call · accepted 2/2 (first try 1)\n"
+        );
         client.cancel().await.expect("stop MCP");
     })
     .await

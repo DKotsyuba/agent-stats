@@ -5,6 +5,10 @@ use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::{Value, json};
 #[path = "model_stats.rs"]
 mod tool_model_stats;
+#[path = "rate_result.rs"]
+mod tool_rate_result;
+#[path = "ratings.rs"]
+mod tool_ratings;
 // xtask:modules
 
 pub fn definitions() -> Vec<Value> {
@@ -13,6 +17,8 @@ pub fn definitions() -> Vec<Value> {
         "inputSchema":{"type":"object","properties":{},"additionalProperties":false},
         "annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}}),
         tool_model_stats::definition(),
+        tool_rate_result::definition(),
+        tool_ratings::definition(),
         // xtask:definitions
     ]
 }
@@ -23,6 +29,8 @@ pub fn templates() -> Vec<(&'static str, &'static str)> {
             "ERROR invalid_arguments: get_status accepts an empty argument object.\n",
         ),
         ("model_stats", tool_model_stats::TEMPLATE),
+        ("rate_result", tool_rate_result::TEMPLATE),
+        ("ratings", tool_ratings::TEMPLATE),
         // xtask:templates
     ]
 }
@@ -30,6 +38,8 @@ pub fn incomplete() -> Vec<&'static str> {
     let statuses: &[(&str, bool)] = &[
         ("get_status", true),
         ("model_stats", tool_model_stats::IMPLEMENTED),
+        ("rate_result", tool_rate_result::IMPLEMENTED),
+        ("ratings", tool_ratings::IMPLEMENTED),
         // xtask:readiness
     ];
     statuses
@@ -69,6 +79,8 @@ pub async fn call(
             Some(result)
         }
         "model_stats" => Some(tool_model_stats::call(args, _templates, socket).await),
+        "rate_result" => Some(tool_rate_result::call(args, _templates, socket).await),
+        "ratings" => Some(tool_ratings::call(args, _templates, socket).await),
         // xtask:routes
         _ => None,
     }

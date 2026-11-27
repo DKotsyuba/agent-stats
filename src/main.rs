@@ -55,6 +55,55 @@ enum Commands {
         #[arg(long, default_value = stats::SOCKET)]
         socket: PathBuf,
     },
+    /// Record or replace the orchestrator rating of one delegated result.
+    #[cfg(unix)]
+    Rate {
+        #[arg(long, default_value = stats::SOCKET)]
+        socket: PathBuf,
+        /// Run id of the delegated agent.
+        #[arg(long)]
+        agent_id: String,
+        /// Exact model identifier that produced the result.
+        #[arg(long)]
+        model: String,
+        #[arg(long)]
+        provider: Option<String>,
+        #[arg(long)]
+        effort: Option<String>,
+        #[arg(long, value_enum)]
+        tier: Option<stats::Tier>,
+        #[arg(long, value_enum)]
+        verdict: stats::Verdict,
+        /// Fix rounds before acceptance; 0 for accepted, at least 1 for accepted_after_fixes.
+        #[arg(long)]
+        rounds: Option<u32>,
+        #[arg(long, value_enum)]
+        reason: Option<stats::Reason>,
+        /// Verification checks that passed.
+        #[arg(long)]
+        checks_passed: Option<u32>,
+        /// Verification checks that failed.
+        #[arg(long)]
+        checks_failed: Option<u32>,
+        /// Verification checks that were not run.
+        #[arg(long)]
+        checks_not_run: Option<u32>,
+        /// Free-form note of at most 200 characters.
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Read a newest-first page of recorded ratings as versioned JSON.
+    #[cfg(unix)]
+    Ratings {
+        #[arg(long, default_value = stats::SOCKET)]
+        socket: PathBuf,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        limit: Option<u32>,
+        #[arg(long)]
+        cursor: Option<String>,
+    },
     /// Run the protocol-only stdio endpoint.
     Mcp {
         #[arg(long, default_value = DEFAULT_MCP_SOCKET)]
@@ -210,7 +259,7 @@ impl ServerHandler for Handler {
             env!("CARGO_PKG_VERSION"),
         ))
         .with_instructions(
-            "Use model_stats to compare models and get_status for frontend identity.",
+            "Use model_stats to compare models, rate_result to rate a delegated result, ratings to list ratings and get_status for frontend identity.",
         )
     }
     /// Return the static catalog; modern requests cache it privately for 60 seconds.
@@ -332,6 +381,61 @@ async fn main() -> ExitCode {
             .await
         }
         #[cfg(unix)]
+        Commands::Rate {
+            socket,
+            agent_id,
+            model,
+            provider,
+            effort,
+            tier,
+            verdict,
+            rounds,
+            reason,
+            checks_passed,
+            checks_failed,
+            checks_not_run,
+            note,
+        } => {
+            let checks = (checks_passed, checks_failed, checks_not_run) != (None, None, None);
+            stats_read(
+                &socket,
+                stats::Operation::RateResult(stats::Rating {
+                    agent_id,
+                    model,
+                    provider,
+                    effort,
+                    tier,
+                    verdict,
+                    rounds,
+                    reason,
+                    checks: checks.then(|| stats::Checks {
+                        passed: checks_passed.unwrap_or(0),
+                        failed: checks_failed.unwrap_or(0),
+                        not_run: checks_not_run.unwrap_or(0),
+                    }),
+                    note,
+                }),
+            )
+            .await
+        }
+        #[cfg(unix)]
+        Commands::Ratings {
+            socket,
+            model,
+            limit,
+            cursor,
+        } => {
+            stats_read(
+                &socket,
+                stats::Operation::Ratings {
+                    model,
+                    limit,
+                    cursor,
+                },
+            )
+            .await
+        }
+        #[cfg(unix)]
         Commands::Status { socket } => stats_read(&socket, stats::Operation::Status).await,
         Commands::SelfInstall {
             bundle,
@@ -402,7 +506,7 @@ async fn main() -> ExitCode {
     }
 }
 
-/// Print the versioned socket reply and propagate application errors via exit status.
+/// Print the versioned socket reply (read or write) and propagate application errors via exit status.
 #[cfg(unix)]
 async fn stats_read(socket: &std::path::Path, operation: stats::Operation) -> ExitCode {
     match stats::call(socket, operation).await {

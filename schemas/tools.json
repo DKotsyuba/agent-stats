@@ -21,7 +21,7 @@
       "openWorldHint": false,
       "readOnlyHint": true
     },
-    "description": "Compare model speed, time to first token, and call volume over a rolling window.",
+    "description": "Compare model speed, time to first token, call volume and orchestrator acceptance ratings (see rate_result) over a rolling window.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -30,7 +30,8 @@
           "enum": [
             "model",
             "provider+model",
-            "harness+model"
+            "harness+model",
+            "model+effort"
           ],
           "type": "string"
         },
@@ -51,5 +52,133 @@
       "type": "object"
     },
     "name": "model_stats"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Rate a delegated agent's result so model_stats can report acceptance rates. Idempotent per agent_id: a later rating replaces the earlier one. Requires a UID the service allows to rate.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "agent_id": {
+          "description": "Run id of the delegated agent",
+          "type": "string"
+        },
+        "checks": {
+          "additionalProperties": false,
+          "description": "Verification check counts",
+          "properties": {
+            "failed": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "not_run": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "passed": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "effort": {
+          "description": "Reasoning effort the agent ran with",
+          "type": "string"
+        },
+        "model": {
+          "description": "Exact model identifier that produced the result",
+          "type": "string"
+        },
+        "note": {
+          "maxLength": 200,
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "reason": {
+          "description": "Why fixes were needed or the result was rejected; not allowed for accepted",
+          "enum": [
+            "wrong_solution",
+            "incomplete",
+            "missing_access",
+            "broke_other",
+            "environment",
+            "other"
+          ],
+          "type": "string"
+        },
+        "rounds": {
+          "description": "Fix rounds before acceptance or rejection; 0 for accepted, at least 1 for accepted_after_fixes (default 1)",
+          "maximum": 1000,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tier": {
+          "description": "Task tier",
+          "enum": [
+            "S",
+            "A",
+            "B",
+            "C",
+            "D",
+            "E",
+            "F"
+          ],
+          "type": "string"
+        },
+        "verdict": {
+          "enum": [
+            "accepted",
+            "accepted_after_fixes",
+            "rejected"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "agent_id",
+        "model",
+        "verdict"
+      ],
+      "type": "object"
+    },
+    "name": "rate_result"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "List recent result ratings recorded with rate_result, newest first, up to 90 days.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "description": "next_cursor from the previous page",
+          "type": "string"
+        },
+        "limit": {
+          "default": 10,
+          "maximum": 20,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "model": {
+          "description": "Exact model identifier",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "name": "ratings"
   }
 ]

@@ -1,5 +1,5 @@
 {% for row in rows %}
-{{ row.model }}{% if row.dimension %} ({{ row.dimension }}){% endif %}: {% if row.count < 5 %}too few samples{% else %}{% if row.speed %}{% if row.estimated %}~{% endif %}{{ row.speed }} tok/s{% if row.estimated %} (est.){% endif %} median{% if row.range %} (p10–p90 {{ row.range }}){% endif %}{% else %}speed unavailable{% endif %}, TTFT {% if row.ttft %}{{ row.ttft }} s median{% else %}unavailable{% endif %}{% endif %}, {{ row.count }} call{% if row.count != 1 %}s{% endif %}{{ "\n" -}}
+{{ row.model }}{% if row.dimension %} ({{ row.dimension }}){% endif %}: {% if row.count < 5 %}too few samples{% else %}{% if row.speed %}{% if row.estimated %}~{% endif %}{{ row.speed }} tok/s{% if row.estimated %} (est.){% endif %} median{% if row.range %} (p10–p90 {{ row.range }}){% endif %}{% else %}speed unavailable{% endif %}, TTFT {% if row.ttft %}{{ row.ttft }} s median{% else %}unavailable{% endif %}{% endif %}, {{ row.count }} call{% if row.count != 1 %}s{% endif %}{% if row.rating %} · {{ row.rating }}{% endif %}{{ "\n" -}}
 {% else %}
 No matching model calls.
 {% endfor %}
