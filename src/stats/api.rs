@@ -93,6 +93,11 @@ struct Metrics {
     ttft: Vec<f64>,
 }
 
+/// Minimum output tokens for a speed sample.
+const SPEED_MIN_OUTPUT_TOKENS: i64 = 100;
+/// Minimum share of the request duration spent after the first token for a speed sample.
+const SPEED_MIN_GENERATION_SHARE: f64 = 0.2;
+
 impl Metrics {
     /// Count every row, with independent eligibility for speed and TTFT.
     fn push(
@@ -105,9 +110,13 @@ impl Metrics {
         self.count += 1;
         if let Some(ttft) = ttft {
             self.ttft.push(ttft);
+            // Speed needs a real streaming window: at least 100 output tokens (a fixed end-of-stream
+            // tail dominates shorter answers) and generation taking at least a fifth of the request
+            // (otherwise the body arrived as one burst, e.g. after unstreamed thinking or a buffering gateway).
             if let (Some(output), Some(duration)) = (output, duration)
-                && output >= 20
+                && output >= SPEED_MIN_OUTPUT_TOKENS
                 && duration - ttft >= 50.0
+                && (duration - ttft) >= duration * SPEED_MIN_GENERATION_SHARE
             {
                 let speed = output as f64 * 1000.0 / (duration - ttft);
                 if speed.is_finite() {
@@ -156,18 +165,19 @@ fn summary(mut values: Vec<f64>) -> Value {
 mod tests {
     use super::Metrics;
 
-    /// Both thresholds are inclusive, and only eligible estimates flag a group.
+    /// Output, window and generation-share thresholds are inclusive; only eligible estimates flag a group.
     #[test]
     fn speed_thresholds_and_provenance() {
         let mut metrics = Metrics::default();
-        metrics.push(Some(19), Some(200.0), Some(100.0), true);
-        metrics.push(Some(20), Some(149.0), Some(100.0), true);
-        metrics.push(Some(20), Some(150.0), Some(100.0), false);
+        metrics.push(Some(99), Some(1000.0), Some(100.0), true);
+        metrics.push(Some(100), Some(149.0), Some(100.0), true);
+        metrics.push(Some(100), Some(1000.0), Some(801.0), true);
+        metrics.push(Some(100), Some(1000.0), Some(800.0), false);
         let result = metrics.finish();
-        assert_eq!(result["count"], 3);
-        assert_eq!(result["ttft_ms"]["count"], 3);
+        assert_eq!(result["count"], 4);
+        assert_eq!(result["ttft_ms"]["count"], 4);
         assert_eq!(result["speed_tokens_per_second"]["count"], 1);
-        assert_eq!(result["speed_tokens_per_second"]["mean"], 400.0);
+        assert_eq!(result["speed_tokens_per_second"]["mean"], 500.0);
         assert_eq!(result["speed_estimated"], false);
     }
 }

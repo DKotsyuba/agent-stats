@@ -369,7 +369,13 @@ fn codex_pairing_across_batches() {
         .and_then(Value::as_array)
         .expect("capture records");
     let request = records[12].clone();
-    let completion = records[14].clone();
+    let mut completion = records[14].clone();
+    // The capture's 30-token answer is below the speed floor; use a 300-token completion.
+    for attribute in completion["attributes"].as_array_mut().expect("attributes") {
+        if attribute["key"] == "output_token_count" {
+            attribute["value"] = json!({"stringValue": "300"});
+        }
+    }
     for record in [request, completion.clone(), completion] {
         *export.pointer_mut(path).expect("record array") = json!([record]);
         assert_eq!(
@@ -388,7 +394,7 @@ fn codex_pairing_across_batches() {
         (metrics["speed_tokens_per_second"]["mean"]
             .as_f64()
             .expect("speed")
-            - 30_000.0 / 524.0)
+            - 300_000.0 / 524.0)
             .abs()
             < 1e-9
     );
